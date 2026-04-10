@@ -21,45 +21,75 @@ import (
 	"github.com/scottbass3/quizz-backend/migrations"
 )
 
-// hubStore is a simple in-process registry of per-game WebSocket hubs.
-type hubStore struct {
-	mu     sync.RWMutex
-	hubs   map[string]*appws.Hub
-	logger *slog.Logger
+// gameSession holds the per-game WebSocket hub and the Redis pub/sub broadcaster.
+type gameSession struct {
+	hub         *appws.Hub
+	broadcaster *appredis.PubSubBroadcaster
 }
 
-func newHubStore(logger *slog.Logger) *hubStore {
-	return &hubStore{
-		hubs:   make(map[string]*appws.Hub),
-		logger: logger,
+// gameSessionStore manages per-game sessions (hub + Redis broadcaster).
+// It implements handler.gameSessionRegistry.
+type gameSessionStore struct {
+	mu       sync.RWMutex
+	sessions map[string]*gameSession
+	rdb      *appredis.Client
+	logger   *slog.Logger
+}
+
+func newGameSessionStore(rdb *appredis.Client, logger *slog.Logger) *gameSessionStore {
+	return &gameSessionStore{
+		sessions: make(map[string]*gameSession),
+		rdb:      rdb,
+		logger:   logger,
 	}
 }
 
-func (s *hubStore) GetOrCreate(gameID string) *appws.Hub {
+// GetOrCreate returns the broadcaster (for the engine) and the hub (for WS registration).
+// If no session exists for gameID, both are created and the Redis subscriber is started.
+func (s *gameSessionStore) GetOrCreate(gameID string) (game.Broadcaster, *appws.Hub) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if h, ok := s.hubs[gameID]; ok {
-		return h
+
+	if sess, ok := s.sessions[gameID]; ok {
+		return sess.broadcaster, sess.hub
 	}
-	h := appws.NewHub(s.logger)
-	s.hubs[gameID] = h
-	return h
+
+	hub := appws.NewHub(s.logger)
+	b := appredis.NewPubSubBroadcaster(s.rdb.Unwrap(), gameID, hub, s.logger)
+
+	s.sessions[gameID] = &gameSession{hub: hub, broadcaster: b}
+	s.logger.Debug("game session created", "game_id", gameID)
+	return b, hub
 }
 
-func (s *hubStore) Get(gameID string) (*appws.Hub, bool) {
+// GetHub returns the WS hub for an existing game (used by the WebSocket upgrade handler).
+func (s *gameSessionStore) GetHub(gameID string) (*appws.Hub, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	h, ok := s.hubs[gameID]
-	return h, ok
+	if sess, ok := s.sessions[gameID]; ok {
+		return sess.hub, true
+	}
+	return nil, false
+}
+
+// Stop cancels all active Redis subscriptions. Called at shutdown.
+func (s *gameSessionStore) Stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		sess.broadcaster.Stop()
+	}
+	s.logger.Debug("game session store stopped", "count", len(s.sessions))
 }
 
 // App is the top-level application that wires all dependencies together.
 type App struct {
-	cfg    *config.Config
-	logger *slog.Logger
-	server *http.Server
-	pg     *postgres.DB
-	redis  *appredis.Client
+	cfg      *config.Config
+	logger   *slog.Logger
+	server   *http.Server
+	pg       *postgres.DB
+	redis    *appredis.Client
+	sessions *gameSessionStore
 }
 
 func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
@@ -83,11 +113,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("app: redis: %w", err)
 	}
 	a.redis = rdb
+	logger.Info("redis connected", "addr", cfg.RedisAddr)
+
+	// Game session store: manages hub + Redis pub/sub broadcaster per game.
+	sessions := newGameSessionStore(rdb, logger)
+	a.sessions = sessions
 
 	// Game layer
 	engineCfg := game.EngineConfig{InitialLives: cfg.GameInitialLives}
 	manager := game.NewManager(engineCfg)
-	hubs := newHubStore(logger)
 
 	// Stores
 	var gs store.GameStore = pg
@@ -95,7 +129,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	var qls store.QuestionListStore = pg
 
 	// Handlers
-	gameH := handler.NewGameHandler(manager, hubs, gs, ps, qls, engineCfg, logger)
+	gameH := handler.NewGameHandler(manager, sessions, gs, ps, qls, engineCfg, logger)
 	qlH := handler.NewQuestionListHandler(qls, logger)
 	healthH := handler.NewHealthHandler()
 
@@ -162,6 +196,7 @@ func (a *App) Run(ctx context.Context) error {
 		a.logger.Error("graceful shutdown failed", "error", err)
 	}
 
+	a.sessions.Stop()
 	a.pg.Close()
 	if err := a.redis.Close(); err != nil {
 		a.logger.Error("redis close", "error", err)

@@ -38,6 +38,27 @@ Game state is **in-memory only** (`game.Engine`, one per game). The engine holds
 
 `game.Manager` is the in-memory registry of all active engines.
 
+### Redis pub/sub broadcaster
+
+`redis.PubSubBroadcaster` implements `game.Broadcaster` via Redis pub/sub:
+- `Broadcast` / `BroadcastTo` → publish to channel `game:<id>:events`
+- A subscriber goroutine reads from that channel → forwards to the local `ws.Hub` → WS clients
+
+This makes the event path horizontally scalable: multiple API instances subscribe to the same channel and each forwards to their own WS connections. The broadcaster is created per-game in `app.gameSessionStore.GetOrCreate`. All broadcasters are stopped (`Stop()`) during graceful shutdown.
+
+**Note:** `game_joined` is sent directly via `hub.BroadcastTo` (bypassing Redis) because it is a connection handshake that must arrive immediately and synchronously before the read/write pumps start.
+
+### Postgres persistence
+
+Writes are best-effort (non-fatal — logged but don't abort requests):
+
+| Operation               | Persisted fields                          |
+|-------------------------|-------------------------------------------|
+| `POST /games`           | game row + owner player row               |
+| `POST /games/{id}/join` | player row                                |
+| `POST /games/{id}/start`| `games.status = 'running'`                |
+| `POST /games/{id}/close`| `players.lives` + `players.active` for every player who lost a life; `games.status = 'finished'` if game over |
+
 ### Question lists and access rules
 
 `QuestionListStore` (implemented by `postgres.DB`) manages the catalog:

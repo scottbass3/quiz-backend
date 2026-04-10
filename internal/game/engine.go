@@ -32,9 +32,18 @@ type Broadcaster interface {
 	BroadcastTo(playerID string, event domain.Event)
 }
 
+// LifeDelta records the life change for a single player after closing a question.
+// Used for best-effort persistence to Postgres without needing a second snapshot.
+type LifeDelta struct {
+	PlayerID  string
+	LivesLeft int
+	Active    bool
+}
+
 type CloseQuestionResult struct {
-	LifeLost   []string
-	Eliminated []string
+	LifeLost   []string    // player IDs who lost a life
+	LifeDeltas []LifeDelta // detailed life info for persistence
+	Eliminated []string    // player IDs who reached 0 lives
 	GameOver   bool
 	Winner     string // empty if draw / no survivors
 }
@@ -241,11 +250,22 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 		}
 	}
 
-	// Snapshot data needed for events before releasing the lock.
+	// Snapshot data needed for events and persistence before releasing the lock.
 	livesAfter := make(map[string]int, len(result.LifeLost))
 	for _, pid := range result.LifeLost {
 		livesAfter[pid] = e.game.Players[pid].Lives
 	}
+	// Build LifeDeltas for best-effort Postgres persistence.
+	result.LifeDeltas = make([]LifeDelta, 0, len(result.LifeLost))
+	for _, pid := range result.LifeLost {
+		p := e.game.Players[pid]
+		result.LifeDeltas = append(result.LifeDeltas, LifeDelta{
+			PlayerID:  pid,
+			LivesLeft: p.Lives,
+			Active:    p.Active,
+		})
+	}
+
 	correctOptionID := q.CorrectOptionID
 	questionID := q.ID
 	winner := result.Winner

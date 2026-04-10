@@ -25,15 +25,19 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// hubRegistry maps gameID → Hub so the WS handler can look up the right hub.
-type hubRegistry interface {
-	GetOrCreate(gameID string) *appws.Hub
-	Get(gameID string) (*appws.Hub, bool)
+// gameSessionRegistry provides access to per-game broadcasters and WS hubs.
+// Implemented by app.gameSessionStore.
+type gameSessionRegistry interface {
+	// GetOrCreate returns the broadcaster (used by the engine) and the hub (used for WS registration).
+	// Both are created on the first call for a given gameID; subsequent calls return the same pair.
+	GetOrCreate(gameID string) (game.Broadcaster, *appws.Hub)
+	// GetHub returns the WS hub for an existing game.
+	GetHub(gameID string) (*appws.Hub, bool)
 }
 
 type GameHandler struct {
 	manager           *game.Manager
-	hubs              hubRegistry
+	sessions          gameSessionRegistry
 	gameStore         store.GameStore
 	playerStore       store.PlayerStore
 	questionListStore store.QuestionListStore
@@ -43,7 +47,7 @@ type GameHandler struct {
 
 func NewGameHandler(
 	manager *game.Manager,
-	hubs hubRegistry,
+	sessions gameSessionRegistry,
 	gameStore store.GameStore,
 	playerStore store.PlayerStore,
 	questionListStore store.QuestionListStore,
@@ -52,7 +56,7 @@ func NewGameHandler(
 ) *GameHandler {
 	return &GameHandler{
 		manager:           manager,
-		hubs:              hubs,
+		sessions:          sessions,
 		gameStore:         gameStore,
 		playerStore:       playerStore,
 		questionListStore: questionListStore,
@@ -117,8 +121,9 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 	gameID := uuid.NewString()
 	ownerID := uuid.NewString()
 
-	hub := h.hubs.GetOrCreate(gameID)
-	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, hub)
+	// GetOrCreate wires the Redis pub/sub broadcaster (for the engine) to the WS hub (for clients).
+	broadcaster, _ := h.sessions.GetOrCreate(gameID)
+	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, broadcaster)
 
 	if err := eng.AddPlayer(ownerID, req.OwnerName); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to add owner")
@@ -146,7 +151,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 				Active:    true,
 				CreatedAt: now,
 			}); err != nil {
-				h.logger.Error("create player in postgres", "error", err)
+				h.logger.Error("create owner player in postgres", "error", err)
 			}
 		}
 	}
@@ -273,6 +278,13 @@ func (h *GameHandler) StartNextQuestion(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Best-effort: persist game status transition to "running".
+	if h.gameStore != nil {
+		if err := h.gameStore.UpdateGameStatus(r.Context(), gameID, string(domain.GameStatusRunning)); err != nil {
+			h.logger.Error("update game status in postgres", "error", err, "game_id", gameID)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "question started"})
 }
 
@@ -294,6 +306,22 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
+	}
+
+	// Best-effort: persist player life changes.
+	if h.playerStore != nil {
+		for _, delta := range result.LifeDeltas {
+			if err := h.playerStore.UpdatePlayerLives(r.Context(), delta.PlayerID, delta.LivesLeft, delta.Active); err != nil {
+				h.logger.Error("update player lives in postgres", "error", err, "player_id", delta.PlayerID)
+			}
+		}
+	}
+
+	// Best-effort: persist game status if the game is now finished.
+	if result.GameOver && h.gameStore != nil {
+		if err := h.gameStore.UpdateGameStatus(r.Context(), gameID, string(domain.GameStatusFinished)); err != nil {
+			h.logger.Error("update game status (finished) in postgres", "error", err, "game_id", gameID)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -326,9 +354,10 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hub, ok := h.hubs.Get(gameID)
+	// The hub handles local WS connection management; the broadcaster routes events via Redis.
+	hub, ok := h.sessions.GetHub(gameID)
 	if !ok {
-		writeError(w, http.StatusNotFound, "game hub not found")
+		writeError(w, http.StatusNotFound, "game session not found")
 		return
 	}
 
@@ -343,14 +372,16 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	defer hub.Unregister(playerID)
 
 	// Notify the player they have joined.
+	// BroadcastTo goes through Redis → subscriber → hub → WS client.
+	snap2 := eng.Snapshot()
 	hub.BroadcastTo(playerID, domain.Event{
 		Type: domain.EventGameJoined,
 		Payload: map[string]any{
 			"game_id":          gameID,
 			"player_id":        playerID,
-			"status":           snap.Status,
-			"question_list_id": snap.QuestionListID,
-			"total_questions":  len(snap.Questions),
+			"status":           snap2.Status,
+			"question_list_id": snap2.QuestionListID,
+			"total_questions":  len(snap2.Questions),
 		},
 	})
 
