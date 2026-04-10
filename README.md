@@ -16,7 +16,8 @@ internal/
   ws/            — Hub (broadcast) + Client (read/write pump per connection)
   handler/       — chi HTTP handlers + WebSocket upgrade
   app/           — wires all layers, runs the HTTP server
-migrations/      — plain SQL migrations (run via golang-migrate)
+migrations/      — SQL embedded in the binary, applied automatically at startup
+tools/test-ui/   — Vite + Vue 3 dev tool for manual testing
 ```
 
 **Key design decisions:**
@@ -26,33 +27,38 @@ migrations/      — plain SQL migrations (run via golang-migrate)
 - One `Hub` per game — no global broadcast bus, straightforward fan-out
 - Postgres and Redis are initialized at startup but the game state lives in memory for now; both stores are wired and ready for use
 - Events are broadcast *after* releasing the game lock to avoid contention
+- Migrations are embedded in the binary (`//go:embed`) and run automatically on startup — no external migration tool required
 
 ## Prerequisites
 
 - Docker & Docker Compose v2
-- Go 1.22+ (for local runs without Docker)
+- Go 1.23+ (for local runs without Docker)
 
 ## Quick start
 
 ```bash
 cp .env.example .env   # adjust if needed
-make up                # builds and starts api + postgres + redis
-make migrate-up        # run SQL migrations
+make up                # builds and starts api + postgres + redis + test-ui
 ```
 
-The API is available at `http://localhost:8080`.
+Migrations run automatically when the API starts.
+
+- API: `http://localhost:8080`
+- Test UI: `http://localhost:5173`
 
 ## Environment variables
 
-| Variable             | Default                                              | Description                         |
-|----------------------|------------------------------------------------------|-------------------------------------|
-| `HTTP_ADDR`          | `:8080`                                              | Address the server listens on       |
-| `DATABASE_URL`       | `postgres://quizz:quizz@localhost:5432/quizz?...`   | PostgreSQL DSN                      |
-| `REDIS_ADDR`         | `localhost:6379`                                     | Redis address                       |
-| `REDIS_PASSWORD`     | *(empty)*                                            | Redis password                      |
-| `LOG_LEVEL`          | `info`                                               | `debug` / `info` / `warn` / `error` |
-| `GAME_INITIAL_LIVES` | `3`                                                  | Lives per player                    |
-| `SHUTDOWN_TIMEOUT`   | `10s`                                                | Graceful shutdown window            |
+| Variable             | Default                                            | Description                         |
+|----------------------|----------------------------------------------------|-------------------------------------|
+| `HTTP_PORT`          | `8080`                                             | Host port exposed by Docker         |
+| `HTTP_ADDR`          | `:8080`                                            | Address the server listens on       |
+| `DATABASE_URL`       | `postgres://quizz:quizz@localhost:5432/quizz?...` | PostgreSQL DSN                      |
+| `REDIS_ADDR`         | `localhost:6379`                                   | Redis address                       |
+| `REDIS_PASSWORD`     | *(empty)*                                          | Redis password                      |
+| `LOG_LEVEL`          | `info`                                             | `debug` / `info` / `warn` / `error` |
+| `GAME_INITIAL_LIVES` | `3`                                                | Lives per player                    |
+| `SHUTDOWN_TIMEOUT`   | `10s`                                              | Graceful shutdown window            |
+| `UI_PORT`            | `5173`                                             | Host port for the test UI           |
 
 ## HTTP API
 
@@ -71,6 +77,8 @@ POST /games
 → { "game_id": "...", "owner_id": "..." }
 ```
 
+The owner is automatically added as a player.
+
 ### Join game
 
 ```
@@ -79,14 +87,16 @@ POST /games/{id}/join
 → { "game_id": "...", "player_id": "..." }
 ```
 
+Only works while the game is in `waiting` status.
+
 ### Get game state
 
 ```
 GET /games/{id}
-→ { "id": "...", "status": "waiting", "players": [...], ... }
+→ { "id": "...", "status": "waiting", "players": [...], "current_q_idx": -1, "total_questions": 0 }
 ```
 
-### Add question (owner only — auth not yet implemented)
+### Add question
 
 ```
 POST /games/{id}/questions
@@ -113,21 +123,25 @@ POST /games/{id}/close
 → { "life_lost": [...], "eliminated": [...], "game_over": false, "winner": "" }
 ```
 
+Players who did not answer or answered incorrectly lose one life. `life_lost` is sent privately to each affected player.
+
 ## WebSocket
 
 Connect at `ws://localhost:8080/ws?gameId=...&playerId=...`
 
+The player must have joined via `POST /games/{id}/join` before connecting.
+
 **Server → client events:**
 
-| `type`               | Description                                          |
-|----------------------|------------------------------------------------------|
-| `game_joined`        | Sent on successful connection                        |
-| `question_started`   | A new question has been broadcast                    |
-| `answer_submitted`   | A player submitted an answer (correctness hidden)    |
-| `question_closed`    | Question ended; correct option revealed              |
-| `life_lost`          | Sent privately to the player who lost a life         |
-| `player_eliminated`  | A player reached 0 lives                             |
-| `game_over`          | Last player standing determined                      |
+| `type`               | Description                                       |
+|----------------------|---------------------------------------------------|
+| `game_joined`        | Sent on successful connection                     |
+| `question_started`   | New question broadcast; includes options          |
+| `answer_submitted`   | A player submitted an answer (correctness hidden) |
+| `question_closed`    | Question ended; correct option revealed           |
+| `life_lost`          | Sent privately to the player who lost a life      |
+| `player_eliminated`  | A player reached 0 lives                          |
+| `game_over`          | Last player standing determined                   |
 
 **Client → server messages:**
 
@@ -135,17 +149,19 @@ Connect at `ws://localhost:8080/ws?gameId=...&playerId=...`
 { "type": "submit_answer", "data": { "question_id": "...", "option_id": "b" } }
 ```
 
+Only the first submission per player per question is recorded.
+
 ## Useful commands
 
 ```bash
-make up           # start all services
+make up           # start all services (api + postgres + redis + test-ui)
 make down         # stop all services
 make logs         # tail API logs
+make ui-logs      # tail test-ui logs
 make test         # run all tests with race detector
 make fmt          # format code
 make lint         # run golangci-lint (falls back to go vet)
-make migrate-up   # apply pending migrations
-make migrate-down # rollback last migration
+make migrate-up   # restart API to reapply embedded migrations
 make shell        # sh into the API container
 make build        # build binary locally
 ```
