@@ -12,6 +12,7 @@ interface Slot { id: string }
 
 const gameId = ref('')
 const selectedList = ref<QuestionListRecord | null>(null)
+const sidebarTab = ref<'lists' | 'game'>('lists')
 
 const slots = reactive<Slot[]>([
   { id: crypto.randomUUID() },
@@ -38,6 +39,7 @@ function onGameIdChange(id: string) {
 
 function onListSelected(list: QuestionListRecord) {
   selectedList.value = list
+  sidebarTab.value = 'game'
 }
 </script>
 
@@ -62,16 +64,33 @@ function onListSelected(list: QuestionListRecord) {
 
       <!-- Sidebar: controls -->
       <aside class="sidebar">
-        <!-- Dev identity simulation -->
         <ActorBar />
-
         <HealthPanel />
 
-        <!-- Question list catalog -->
-        <QuestionListsPanel @list-selected="onListSelected" />
+        <!-- Tab bar -->
+        <div class="tab-bar">
+          <button
+            class="tab-btn"
+            :class="{ active: sidebarTab === 'lists' }"
+            @click="sidebarTab = 'lists'"
+          >Lists</button>
+          <button
+            class="tab-btn"
+            :class="{ active: sidebarTab === 'game' }"
+            @click="sidebarTab = 'game'"
+          >
+            Game
+            <span v-if="gameId" class="tab-dot" />
+          </button>
+        </div>
 
-        <!-- Game lifecycle -->
+        <QuestionListsPanel
+          v-show="sidebarTab === 'lists'"
+          @list-selected="onListSelected"
+        />
+
         <GamePanel
+          v-show="sidebarTab === 'game'"
           :gameId="gameId"
           :selectedList="selectedList"
           @game-created="onGameCreated"

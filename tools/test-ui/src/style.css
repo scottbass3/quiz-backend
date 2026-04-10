@@ -278,6 +278,36 @@ button.success:hover { background: #1a2e1a; }
 .list-item:hover { border-color: var(--blue); }
 .list-item.selected { border-color: var(--blue); background: #1c2a3e; }
 
+/* ── Sidebar tabs ── */
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin: 0 -12px;
+  padding: 0 12px;
+  gap: 2px;
+}
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px 4px;
+  position: relative;
+}
+.tab-btn:hover { background: none; border-color: var(--border); color: var(--text); }
+.tab-btn.active { border-bottom-color: var(--blue); color: var(--blue); }
+.tab-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
 /* ── Misc ── */
 .muted   { color: var(--muted); }
 .success { color: var(--green); }
