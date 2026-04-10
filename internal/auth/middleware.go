@@ -41,8 +41,8 @@ func Middleware(secret []byte, oidcEnabled bool) func(http.Handler) http.Handler
 func actorFromDebugHeaders(r *http.Request) *Actor {
 	t := r.Header.Get("X-Debug-Actor-Type")
 	id := r.Header.Get("X-Debug-Actor-Id")
-	if t != "admin" && t != "user" {
-		t = "user"
+	if t != string(domain.ActorTypeAdmin) && t != string(domain.ActorTypeUser) {
+		t = string(domain.ActorTypeUser)
 	}
 	if id == "" {
 		id = "anonymous"

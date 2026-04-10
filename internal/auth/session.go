@@ -10,6 +10,7 @@ import (
 )
 
 const SessionCookie = "quizz_session"
+const StateCookie = "oauth2_state"
 const sessionTTL = 24 * time.Hour
 
 type sessionClaims struct {
@@ -20,15 +21,25 @@ type sessionClaims struct {
 	jwt.RegisteredClaims
 }
 
+func hmacVerifier(secret []byte) jwt.Keyfunc {
+	return func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return secret, nil
+	}
+}
+
 func NewSessionToken(secret []byte, a *Actor) (string, error) {
+	now := time.Now()
 	claims := sessionClaims{
 		Sub:       a.Sub,
 		Name:      a.Name,
 		Email:     a.Email,
 		ActorType: a.ActorType,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(sessionTTL)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(now.Add(sessionTTL)),
+			IssuedAt:  jwt.NewNumericDate(now),
 		},
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
@@ -36,12 +47,7 @@ func NewSessionToken(secret []byte, a *Actor) (string, error) {
 
 func ParseSessionToken(secret []byte, tokenStr string) (*Actor, error) {
 	var claims sessionClaims
-	token, err := jwt.ParseWithClaims(tokenStr, &claims, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("unexpected signing method")
-		}
-		return secret, nil
-	})
+	token, err := jwt.ParseWithClaims(tokenStr, &claims, hmacVerifier(secret))
 	if err != nil || !token.Valid {
 		return nil, errors.New("invalid or expired session")
 	}
@@ -73,12 +79,7 @@ func NewStateToken(secret []byte, state, nonce string) (string, error) {
 
 func ParseStateToken(secret []byte, tokenStr string) (state, nonce string, err error) {
 	var claims stateClaims
-	token, err := jwt.ParseWithClaims(tokenStr, &claims, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("unexpected signing method")
-		}
-		return secret, nil
-	})
+	token, err := jwt.ParseWithClaims(tokenStr, &claims, hmacVerifier(secret))
 	if err != nil || !token.Valid {
 		return "", "", errors.New("invalid or expired state token")
 	}

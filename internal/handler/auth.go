@@ -58,7 +58,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	// Short-lived cookie scoped to /auth to carry state+nonce across the redirect.
 	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth2_state",
+		Name:     auth.StateCookie,
 		Value:    stateToken,
 		Path:     "/auth",
 		HttpOnly: true,
@@ -76,7 +76,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stateCookie, err := r.Cookie("oauth2_state")
+	stateCookie, err := r.Cookie(auth.StateCookie)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "missing state cookie")
 		return
@@ -93,7 +93,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Clear the state cookie.
 	http.SetCookie(w, &http.Cookie{
-		Name: "oauth2_state", Value: "", Path: "/auth", MaxAge: -1,
+		Name: auth.StateCookie, Value: "", Path: "/auth", MaxAge: -1,
 	})
 
 	actor, err := h.provider.Exchange(r.Context(), r.URL.Query().Get("code"), savedNonce)
