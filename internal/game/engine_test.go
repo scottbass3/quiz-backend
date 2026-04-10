@@ -53,7 +53,7 @@ func (s *stubHub) directTypes(playerID string) []domain.EventType {
 }
 
 func newEngine(hub game.Broadcaster) *game.Engine {
-	return game.NewEngine("game-1", "owner-1", game.EngineConfig{InitialLives: 3}, hub)
+	return game.NewEngine("game-1", "owner-1", "", nil, game.EngineConfig{InitialLives: 3}, hub)
 }
 
 func sampleQuestion() *domain.Question {
@@ -106,6 +106,22 @@ func TestStartNextQuestion(t *testing.T) {
 	}
 }
 
+func TestStartNextQuestion_PreloadedQuestions(t *testing.T) {
+	hub := newStubHub()
+	q := sampleQuestion()
+	eng := game.NewEngine("game-x", "owner-1", "list-1", []*domain.Question{q}, game.EngineConfig{InitialLives: 3}, hub)
+	eng.AddPlayer("p1", "Alice")
+
+	if err := eng.StartNextQuestion(); err != nil {
+		t.Fatalf("unexpected error with preloaded questions: %v", err)
+	}
+
+	snap := eng.Snapshot()
+	if snap.QuestionListID != "list-1" {
+		t.Fatalf("expected QuestionListID 'list-1', got %q", snap.QuestionListID)
+	}
+}
+
 func TestSubmitAnswer_CorrectThenClose(t *testing.T) {
 	hub := newStubHub()
 	eng := newEngine(hub)
@@ -150,7 +166,7 @@ func TestSubmitAnswer_CorrectThenClose(t *testing.T) {
 
 func TestPlayerEliminated(t *testing.T) {
 	hub := newStubHub()
-	eng := game.NewEngine("game-2", "owner-1", game.EngineConfig{InitialLives: 1}, hub)
+	eng := game.NewEngine("game-2", "owner-1", "", nil, game.EngineConfig{InitialLives: 1}, hub)
 
 	eng.AddPlayer("p1", "Alice")
 	eng.AddPlayer("p2", "Bob")

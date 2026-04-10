@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref } from 'vue'
 import { api } from '../api'
+import type { QuestionListRecord } from '../types'
 
 const emit = defineEmits<{
   (e: 'game-created', gameId: string, ownerId: string): void
   (e: 'game-id-change', gameId: string): void
 }>()
 
-const props = defineProps<{ gameId: string }>()
+const props = defineProps<{
+  gameId: string
+  selectedList: QuestionListRecord | null
+}>()
 
 // ── Create ──
 const ownerName = ref('Host')
@@ -15,10 +19,14 @@ const creating = ref(false)
 const createError = ref('')
 
 async function createGame() {
+  if (!props.selectedList) {
+    createError.value = 'select a question list first'
+    return
+  }
   creating.value = true
   createError.value = ''
   try {
-    const res = await api.createGame(ownerName.value.trim() || 'Host')
+    const res = await api.createGame(ownerName.value.trim() || 'Host', props.selectedList.id)
     emit('game-created', res.game_id, res.owner_id)
   } catch (e) {
     createError.value = String(e)
@@ -83,50 +91,27 @@ async function closeQuestion() {
     controlling.value = false
   }
 }
-
-// ── Add question ──
-const qText = ref('')
-const qOptions = reactive([
-  { id: 'a', text: '' },
-  { id: 'b', text: '' },
-  { id: 'c', text: '' },
-  { id: 'd', text: '' },
-])
-const qCorrect = ref('a')
-const addingQ = ref(false)
-const addQMsg = ref('')
-
-async function addQuestion() {
-  if (!props.gameId || !qText.value.trim()) return
-  const filled = qOptions.filter(o => o.text.trim())
-  if (filled.length < 2) { addQMsg.value = '2 options minimum'; return }
-  if (!filled.find(o => o.id === qCorrect.value)) { addQMsg.value = 'correct option must be filled'; return }
-
-  addingQ.value = true
-  addQMsg.value = ''
-  try {
-    const res = await api.addQuestion(props.gameId, qText.value.trim(), filled, qCorrect.value)
-    addQMsg.value = `added: ${res.question_id.slice(0, 8)}…`
-    qText.value = ''
-    qOptions.forEach(o => (o.text = ''))
-    qCorrect.value = 'a'
-  } catch (e) {
-    addQMsg.value = String(e)
-  } finally {
-    addingQ.value = false
-  }
-}
 </script>
 
 <template>
   <div class="panel">
-    <h2>Game management</h2>
+    <h2>Game</h2>
+
+    <!-- Selected list summary -->
+    <div style="margin-bottom: 8px; font-size: 11px">
+      <span class="label" style="margin-right:4px">question list:</span>
+      <span v-if="selectedList" style="color:var(--blue)">
+        {{ selectedList.name }}
+        <span class="muted">({{ selectedList.visibility }})</span>
+      </span>
+      <span v-else class="muted">— select a list in the panel above</span>
+    </div>
 
     <!-- Create -->
     <div class="label">create game</div>
     <div class="row" style="margin-bottom: 8px">
       <input v-model="ownerName" type="text" placeholder="owner name" @keyup.enter="createGame" />
-      <button class="primary" @click="createGame" :disabled="creating">create</button>
+      <button class="primary" @click="createGame" :disabled="creating || !selectedList">create</button>
     </div>
     <div v-if="gameId" style="margin-bottom: 8px">
       <span class="label">game id</span>
@@ -153,23 +138,6 @@ async function addQuestion() {
     </div>
     <div v-if="controlMsg" style="font-size:11px" :class="controlMsg.includes('error') || controlMsg.includes('Error') ? 'danger' : 'success'">
       {{ controlMsg }}
-    </div>
-
-    <hr style="border-color: var(--border); margin: 10px 0" />
-
-    <!-- Add question -->
-    <div class="label">add question</div>
-    <input v-model="qText" type="text" placeholder="question text" style="margin-bottom: 6px" />
-    <div class="option-inputs" style="margin-bottom: 6px">
-      <div v-for="opt in qOptions" :key="opt.id" class="option-row">
-        <label>{{ opt.id }}</label>
-        <input v-model="opt.text" type="text" :placeholder="`option ${opt.id}`" />
-        <input type="radio" :value="opt.id" v-model="qCorrect" title="correct" />
-      </div>
-    </div>
-    <div class="btn-row">
-      <button @click="addQuestion" :disabled="addingQ || !gameId">add question</button>
-      <span v-if="addQMsg" style="font-size:11px" :class="addQMsg.includes('added') ? 'success' : 'danger'">{{ addQMsg }}</span>
     </div>
   </div>
 </template>

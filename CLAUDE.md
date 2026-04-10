@@ -1,38 +1,8 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Commands
 
-```bash
-# Start all services (api + postgres + redis + test-ui)
-make up
-
-# Run tests (race detector enabled)
-make test
-
-# Run a single test package
-go test ./internal/game/... -race -count=1
-
-# Run a single test
-go test ./internal/game/... -run TestPlayerEliminated -race -v
-
-# Build locally
-make build          # outputs to bin/api
-
-# Format
-make fmt            # gofmt + goimports
-
-# Lint
-make lint           # golangci-lint, falls back to go vet
-
-# Tail logs
-make logs           # api container
-make ui-logs        # test-ui container
-
-# Reapply migrations (auto-runs on startup; this just restarts the container)
-make migrate-up
-```
+Common commands are listed in the Makefile.
 
 The test-ui (Vite dev server) is at **http://localhost:5173**.
 The API is at **http://localhost:8080** (overridable via `HTTP_PORT` in `.env`).
@@ -44,17 +14,37 @@ The API is at **http://localhost:8080** (overridable via `HTTP_PORT` in `.env`).
 ```
 HTTP/WS request
   → chi router (internal/app/app.go)
-  → handler (internal/handler/game.go)
-  → game.Engine (internal/game/engine.go)   ← all game state lives here
-  → game.Broadcaster (internal/ws/hub.go)   ← fan-out to WS clients
-  → postgres.DB (internal/postgres/)        ← persistence (best-effort, non-fatal)
+  → handler (internal/handler/game.go or question_list.go)
+  → game.Engine (internal/game/engine.go)      ← all runtime game state lives here
+  → game.Broadcaster (internal/ws/hub.go)      ← fan-out to WS clients
+  → postgres.DB (internal/postgres/)           ← persistence (best-effort, non-fatal)
 ```
+
+### Catalog vs runtime separation
+
+**Catalog** (persisted in Postgres):
+- `question_lists` table — name, visibility, owner
+- `question_list_questions` table — ordered questions per list
+
+**Runtime** (in-memory only):
+- `game.Engine` — holds a copy of the questions loaded from the list at game creation, plus player state and answers
+- Questions are copied from the catalog once when `POST /games` is called; the engine never reads Postgres again
+
+This means game state survives temporary DB outages, but does not survive a server restart.
 
 ### Game state model
 
-Game state is **in-memory only** (`game.Engine`, one per game). Postgres and Redis are wired but the engine does not depend on them — the handler calls the store after mutating the engine, and failures are logged but don't abort the request.
+Game state is **in-memory only** (`game.Engine`, one per game). The engine holds a `sync.RWMutex`. The critical rule: **events are broadcast after releasing the lock** to avoid contention with the hub. Any method that mutates state follows the pattern: lock → mutate → collect event data → unlock → broadcast.
 
-The engine holds a `sync.RWMutex`. The critical rule: **events are broadcast after releasing the lock** to avoid contention with the hub. Any method that mutates state follows the pattern: lock → mutate → collect event data → unlock → broadcast.
+`game.Manager` is the in-memory registry of all active engines.
+
+### Question lists and access rules
+
+`QuestionListStore` (implemented by `postgres.DB`) manages the catalog:
+- Public lists: created by `admin` actors, readable by all
+- Private lists: created by `user` actors, visible only to the owning actor
+
+Auth is **not implemented**. Identity is simulated via `X-Debug-Actor-Type` / `X-Debug-Actor-Id` headers — see `internal/handler/actor.go`. Replace this with real middleware before production.
 
 ### WebSocket lifecycle
 
@@ -67,15 +57,20 @@ Each game has one `ws.Hub` (registered in `app.hubStore`). When a player connect
 
 ### Migrations
 
-SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. `app.New()` calls `pg.RunMigrations()` on every startup — safe because all statements use `IF NOT EXISTS`. To add a migration: edit `migrations/001_initial.sql` (or add a new file and update the embed + `RunMigrations`).
+SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Two files are concatenated: `001_initial.sql` (base tables) and `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`). `app.New()` calls `pg.RunMigrations()` on every startup — safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
+
+To add a migration: create `00N_name.sql`, embed it in `migrations.go`, and append it to `SQL`.
 
 ### Test-UI (tools/test-ui)
 
-Vite + Vue 3 + TypeScript dev tool, not production code. All HTTP calls go through Vite's proxy (`/api/*` → backend, `/ws` → backend WS) so there are no CORS issues. `VITE_API_TARGET` controls the proxy target — set to `http://api:8080` in Docker, `http://localhost:8080` locally.
+Vite + Vue 3 + TypeScript dev tool, not production code. All HTTP calls go through Vite's proxy (`/api/*` → backend, `/ws` → backend WS) so there are no CORS issues. `VITE_API_TARGET` controls the proxy target.
+
+The `actor` reactive state (`src/actor.ts`) holds the simulated identity and is injected as headers in every `api.ts` call.
 
 ## Key design constraints
 
 - `game.Engine` has no knowledge of transport (HTTP/WS) or storage — it takes a `Broadcaster` interface.
 - `ws.Hub` implements `game.Broadcaster` — the only coupling point between game logic and WebSocket.
-- `store.GameStore` / `PlayerStore` / `QuestionStore` are interfaces; `postgres.DB` implements all three. Passing `nil` for the stores in tests is valid.
+- `store.GameStore` / `PlayerStore` / `QuestionListStore` are interfaces; `postgres.DB` implements all three. Passing `nil` for the stores in tests is valid.
+- `game.Engine.AddQuestion` is kept for test convenience only — HTTP no longer exposes it. Production games get their questions from the list at creation time.
 - The `go build` in `.air.toml` uses `-buildvcs=false` — required because the container can't access git metadata.

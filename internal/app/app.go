@@ -85,15 +85,18 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	a.redis = rdb
 
 	// Game layer
-	manager := game.NewManager(game.EngineConfig{
-		InitialLives: cfg.GameInitialLives,
-	})
+	engineCfg := game.EngineConfig{InitialLives: cfg.GameInitialLives}
+	manager := game.NewManager(engineCfg)
 	hubs := newHubStore(logger)
 
-	// Handlers
+	// Stores
 	var gs store.GameStore = pg
 	var ps store.PlayerStore = pg
-	gameH := handler.NewGameHandler(manager, hubs, gs, ps, logger)
+	var qls store.QuestionListStore = pg
+
+	// Handlers
+	gameH := handler.NewGameHandler(manager, hubs, gs, ps, qls, engineCfg, logger)
+	qlH := handler.NewQuestionListHandler(qls, logger)
 	healthH := handler.NewHealthHandler()
 
 	// Router
@@ -109,9 +112,17 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		r.Post("/", gameH.CreateGame)
 		r.Get("/{id}", gameH.GetGame)
 		r.Post("/{id}/join", gameH.JoinGame)
-		r.Post("/{id}/questions", gameH.AddQuestion)
 		r.Post("/{id}/start", gameH.StartNextQuestion)
 		r.Post("/{id}/close", gameH.CloseQuestion)
+	})
+
+	r.Route("/question-lists", func(r chi.Router) {
+		r.Post("/", qlH.Create)
+		r.Get("/public", qlH.ListPublic)
+		r.Get("/private", qlH.ListPrivate)
+		r.Get("/{id}", qlH.Get)
+		r.Get("/{id}/questions", qlH.ListQuestions)
+		r.Post("/{id}/questions", qlH.AddQuestion)
 	})
 
 	r.Get("/ws", gameH.WebSocket)

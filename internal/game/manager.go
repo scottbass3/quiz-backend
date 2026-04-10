@@ -3,16 +3,17 @@ package game
 import (
 	"errors"
 	"sync"
+
+	"github.com/scottbass3/quizz-backend/internal/domain"
 )
 
 var ErrGameNotFound = errors.New("game not found")
 
 // Manager holds active game engines in memory.
-// When Redis pub/sub or persistence is needed, this can be replaced or wrapped.
 type Manager struct {
-	mu     sync.RWMutex
-	games  map[string]*Engine
-	cfg    EngineConfig
+	mu    sync.RWMutex
+	games map[string]*Engine
+	cfg   EngineConfig
 }
 
 func NewManager(cfg EngineConfig) *Manager {
@@ -22,8 +23,10 @@ func NewManager(cfg EngineConfig) *Manager {
 	}
 }
 
-func (m *Manager) Create(gameID, ownerID string, hub Broadcaster) *Engine {
-	eng := NewEngine(gameID, ownerID, m.cfg, hub)
+// Create registers a new engine for the given game.
+// questions is the pre-loaded set from the question list.
+func (m *Manager) Create(gameID, ownerID, questionListID string, questions []*domain.Question, hub Broadcaster) *Engine {
+	eng := NewEngine(gameID, ownerID, questionListID, questions, m.cfg, hub)
 
 	m.mu.Lock()
 	m.games[gameID] = eng

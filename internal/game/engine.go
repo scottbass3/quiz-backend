@@ -33,10 +33,10 @@ type Broadcaster interface {
 }
 
 type CloseQuestionResult struct {
-	LifeLost  []string
+	LifeLost   []string
 	Eliminated []string
-	GameOver  bool
-	Winner    string // empty if draw / no survivors
+	GameOver   bool
+	Winner     string // empty if draw / no survivors
 }
 
 type Engine struct {
@@ -46,16 +46,28 @@ type Engine struct {
 	hub  Broadcaster
 }
 
-func NewEngine(gameID, ownerID string, cfg EngineConfig, hub Broadcaster) *Engine {
+// NewEngine creates a new game engine.
+// questions is the pre-loaded set from the question list (may be nil for tests).
+func NewEngine(gameID, ownerID, questionListID string, questions []*domain.Question, cfg EngineConfig, hub Broadcaster) *Engine {
+	if questions == nil {
+		questions = make([]*domain.Question, 0)
+	}
+	// Ensure every question has an Answers map.
+	for _, q := range questions {
+		if q.Answers == nil {
+			q.Answers = make(map[string]*domain.Answer)
+		}
+	}
 	return &Engine{
 		game: &domain.Game{
-			ID:          gameID,
-			Status:      domain.GameStatusWaiting,
-			OwnerID:     ownerID,
-			Players:     make(map[string]*domain.Player),
-			Questions:   make([]*domain.Question, 0),
-			CurrentQIdx: -1,
-			CreatedAt:   time.Now(),
+			ID:             gameID,
+			Status:         domain.GameStatusWaiting,
+			OwnerID:        ownerID,
+			QuestionListID: questionListID,
+			Players:        make(map[string]*domain.Player),
+			Questions:      questions,
+			CurrentQIdx:    -1,
+			CreatedAt:      time.Now(),
 		},
 		cfg: cfg,
 		hub: hub,
@@ -83,6 +95,8 @@ func (e *Engine) AddPlayer(id, name string) error {
 	return nil
 }
 
+// AddQuestion appends a question to the engine's runtime question list.
+// Useful in tests; in production, questions are loaded from the list at creation.
 func (e *Engine) AddQuestion(q *domain.Question) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -227,11 +241,7 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 		}
 	}
 
-	// snapshot data needed for events before releasing lock
-	type playerSnapshot struct {
-		id    string
-		lives int
-	}
+	// Snapshot data needed for events before releasing the lock.
 	livesAfter := make(map[string]int, len(result.LifeLost))
 	for _, pid := range result.LifeLost {
 		livesAfter[pid] = e.game.Players[pid].Lives

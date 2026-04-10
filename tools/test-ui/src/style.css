@@ -259,9 +259,29 @@ button.success:hover { background: #1a2e1a; }
 .heart { color: var(--red); }
 .heart.lost { color: var(--border); }
 
+/* ── Question list items ── */
+.list-scroll {
+  max-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.list-item {
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+  background: var(--bg);
+}
+.list-item:hover { border-color: var(--blue); }
+.list-item.selected { border-color: var(--blue); background: #1c2a3e; }
+
 /* ── Misc ── */
 .muted   { color: var(--muted); }
 .success { color: var(--green); }
 .danger  { color: var(--red); }
 .label   { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
 .game-id { color: var(--blue); font-size: 12px; word-break: break-all; }
+code { background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; font-size: 10px; }

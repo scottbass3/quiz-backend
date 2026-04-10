@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { ref, reactive } from 'vue'
+import ActorBar from './components/ActorBar.vue'
 import HealthPanel from './components/HealthPanel.vue'
+import QuestionListsPanel from './components/QuestionListsPanel.vue'
 import GamePanel from './components/GamePanel.vue'
 import PlayerCard from './components/PlayerCard.vue'
 import DebugPanel from './components/DebugPanel.vue'
+import type { QuestionListRecord } from './types'
 
 interface Slot { id: string }
 
 const gameId = ref('')
+const selectedList = ref<QuestionListRecord | null>(null)
 
 const slots = reactive<Slot[]>([
   { id: crypto.randomUUID() },
@@ -31,6 +35,10 @@ function onGameCreated(id: string, ownerId: string) {
 function onGameIdChange(id: string) {
   gameId.value = id
 }
+
+function onListSelected(list: QuestionListRecord) {
+  selectedList.value = list
+}
 </script>
 
 <template>
@@ -41,7 +49,10 @@ function onGameIdChange(id: string) {
       <span class="header-title">quizz-backend</span>
       <span class="muted">test ui</span>
       <div class="header-spacer" />
-      <span v-if="gameId" class="muted" style="font-size:11px">
+      <span v-if="selectedList" class="muted" style="font-size:11px">
+        list: <span style="color:var(--blue)">{{ selectedList.name }}</span>
+      </span>
+      <span v-if="gameId" class="muted" style="font-size:11px; margin-left:8px">
         game: <span class="game-id">{{ gameId }}</span>
       </span>
     </header>
@@ -49,11 +60,20 @@ function onGameIdChange(id: string) {
     <!-- ── Main ── -->
     <div class="main">
 
-      <!-- Sidebar: game controls -->
+      <!-- Sidebar: controls -->
       <aside class="sidebar">
+        <!-- Dev identity simulation -->
+        <ActorBar />
+
         <HealthPanel />
+
+        <!-- Question list catalog -->
+        <QuestionListsPanel @list-selected="onListSelected" />
+
+        <!-- Game lifecycle -->
         <GamePanel
           :gameId="gameId"
+          :selectedList="selectedList"
           @game-created="onGameCreated"
           @game-id-change="onGameIdChange"
         />

@@ -32,11 +32,13 @@ type hubRegistry interface {
 }
 
 type GameHandler struct {
-	manager  *game.Manager
-	hubs     hubRegistry
-	gameStore store.GameStore
-	playerStore store.PlayerStore
-	logger   *slog.Logger
+	manager           *game.Manager
+	hubs              hubRegistry
+	gameStore         store.GameStore
+	playerStore       store.PlayerStore
+	questionListStore store.QuestionListStore
+	cfg               game.EngineConfig
+	logger            *slog.Logger
 }
 
 func NewGameHandler(
@@ -44,32 +46,79 @@ func NewGameHandler(
 	hubs hubRegistry,
 	gameStore store.GameStore,
 	playerStore store.PlayerStore,
+	questionListStore store.QuestionListStore,
+	cfg game.EngineConfig,
 	logger *slog.Logger,
 ) *GameHandler {
 	return &GameHandler{
-		manager:     manager,
-		hubs:        hubs,
-		gameStore:   gameStore,
-		playerStore: playerStore,
-		logger:      logger,
+		manager:           manager,
+		hubs:              hubs,
+		gameStore:         gameStore,
+		playerStore:       playerStore,
+		questionListStore: questionListStore,
+		cfg:               cfg,
+		logger:            logger,
 	}
 }
 
 // POST /games
 func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
+	a := extractActor(r)
+
 	var req struct {
-		OwnerName string `json:"owner_name"`
+		OwnerName      string `json:"owner_name"`
+		QuestionListID string `json:"question_list_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OwnerName == "" {
 		writeError(w, http.StatusBadRequest, "owner_name is required")
 		return
+	}
+	if req.QuestionListID == "" {
+		writeError(w, http.StatusBadRequest, "question_list_id is required")
+		return
+	}
+
+	// Load and validate the question list.
+	list, err := h.questionListStore.GetQuestionList(r.Context(), req.QuestionListID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "question list not found")
+		return
+	}
+	if list.Visibility == "private" && list.OwnerID != a.ID {
+		writeError(w, http.StatusForbidden, "cannot use another user's private list")
+		return
+	}
+
+	// Load questions from the catalog.
+	qrecs, err := h.questionListStore.ListQuestions(r.Context(), req.QuestionListID)
+	if err != nil {
+		h.logger.Error("load questions for game", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load questions")
+		return
+	}
+
+	questions := make([]*domain.Question, len(qrecs))
+	for i, qr := range qrecs {
+		opts := make([]domain.Option, len(qr.Options))
+		for j, o := range qr.Options {
+			opts[j] = domain.Option{ID: o.ID, Text: o.Text}
+		}
+		questions[i] = &domain.Question{
+			ID:              qr.ID,
+			QuestionListID:  qr.QuestionListID,
+			Text:            qr.Text,
+			Options:         opts,
+			CorrectOptionID: qr.CorrectOptionID,
+			OrderIndex:      qr.OrderIndex,
+			Answers:         make(map[string]*domain.Answer),
+		}
 	}
 
 	gameID := uuid.NewString()
 	ownerID := uuid.NewString()
 
 	hub := h.hubs.GetOrCreate(gameID)
-	eng := h.manager.Create(gameID, ownerID, hub)
+	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, hub)
 
 	if err := eng.AddPlayer(ownerID, req.OwnerName); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to add owner")
@@ -79,21 +128,21 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	if h.gameStore != nil {
 		if err := h.gameStore.CreateGame(r.Context(), store.GameRecord{
-			ID:        gameID,
-			OwnerID:   ownerID,
-			Status:    string(domain.GameStatusWaiting),
-			CreatedAt: now,
-			UpdatedAt: now,
+			ID:             gameID,
+			OwnerID:        ownerID,
+			QuestionListID: req.QuestionListID,
+			Status:         string(domain.GameStatusWaiting),
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}); err != nil {
 			h.logger.Error("create game in postgres", "error", err)
-			// non-fatal: game lives in memory
 		}
 		if h.playerStore != nil {
 			if err := h.playerStore.CreatePlayer(r.Context(), store.PlayerRecord{
 				ID:        ownerID,
 				GameID:    gameID,
 				Name:      req.OwnerName,
-				Lives:     3,
+				Lives:     h.cfg.InitialLives,
 				Active:    true,
 				CreatedAt: now,
 			}); err != nil {
@@ -102,9 +151,11 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]string{
-		"game_id":  gameID,
-		"owner_id": ownerID,
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"game_id":          gameID,
+		"owner_id":         ownerID,
+		"question_list_id": req.QuestionListID,
+		"total_questions":  len(questions),
 	})
 }
 
@@ -146,7 +197,7 @@ func (h *GameHandler) JoinGame(w http.ResponseWriter, r *http.Request) {
 			ID:        playerID,
 			GameID:    gameID,
 			Name:      req.PlayerName,
-			Lives:     3,
+			Lives:     h.cfg.InitialLives,
 			Active:    true,
 			CreatedAt: time.Now().UTC(),
 		}); err != nil {
@@ -193,69 +244,14 @@ func (h *GameHandler) GetGame(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":            snap.ID,
-		"status":        snap.Status,
-		"owner_id":      snap.OwnerID,
-		"players":       players,
-		"current_q_idx": snap.CurrentQIdx,
-		"total_questions": len(snap.Questions),
+		"id":               snap.ID,
+		"status":           snap.Status,
+		"owner_id":         snap.OwnerID,
+		"question_list_id": snap.QuestionListID,
+		"players":          players,
+		"current_q_idx":    snap.CurrentQIdx,
+		"total_questions":  len(snap.Questions),
 	})
-}
-
-// POST /games/{id}/questions  — add a question to a game (owner only, for now unguarded)
-func (h *GameHandler) AddQuestion(w http.ResponseWriter, r *http.Request) {
-	gameID := chi.URLParam(r, "id")
-
-	var req struct {
-		Text            string `json:"text"`
-		Options         []struct {
-			ID   string `json:"id"`
-			Text string `json:"text"`
-		} `json:"options"`
-		CorrectOptionID string `json:"correct_option_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request")
-		return
-	}
-	if req.Text == "" || len(req.Options) < 2 || req.CorrectOptionID == "" {
-		writeError(w, http.StatusBadRequest, "text, at least 2 options and correct_option_id are required")
-		return
-	}
-
-	eng, err := h.manager.Get(gameID)
-	if err != nil {
-		if errors.Is(err, game.ErrGameNotFound) {
-			writeError(w, http.StatusNotFound, "game not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-
-	opts := make([]domain.Option, len(req.Options))
-	for i, o := range req.Options {
-		id := o.ID
-		if id == "" {
-			id = uuid.NewString()
-		}
-		opts[i] = domain.Option{ID: id, Text: o.Text}
-	}
-
-	q := &domain.Question{
-		ID:              uuid.NewString(),
-		Text:            req.Text,
-		Options:         opts,
-		CorrectOptionID: req.CorrectOptionID,
-		Answers:         make(map[string]*domain.Answer),
-	}
-
-	if err := eng.AddQuestion(q); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]string{"question_id": q.ID})
 }
 
 // POST /games/{id}/start — advance to the next question
@@ -350,9 +346,11 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	hub.BroadcastTo(playerID, domain.Event{
 		Type: domain.EventGameJoined,
 		Payload: map[string]any{
-			"game_id":   gameID,
-			"player_id": playerID,
-			"status":    snap.Status,
+			"game_id":          gameID,
+			"player_id":        playerID,
+			"status":           snap.Status,
+			"question_list_id": snap.QuestionListID,
+			"total_questions":  len(snap.Questions),
 		},
 	})
 

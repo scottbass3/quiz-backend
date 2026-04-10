@@ -48,3 +48,25 @@ export interface PlayerState {
   lives: number | null
   eliminated: boolean
 }
+
+// ── Question list catalog types ──────────────────────────────────────────────
+
+export interface QuestionListRecord {
+  id: string
+  name: string
+  description: string
+  visibility: 'public' | 'private'
+  owner_type: string
+  owner_id: string
+  created_at: string
+  updated_at: string
+}
+
+export interface QuestionRecord {
+  id: string
+  question_list_id: string
+  text: string
+  options: Option[]
+  correct_option_id: string
+  order_index: number
+}
