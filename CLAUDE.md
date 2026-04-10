@@ -59,13 +59,29 @@ Writes are best-effort (non-fatal — logged but don't abort requests):
 | `POST /games/{id}/start`| `games.status = 'running'`                |
 | `POST /games/{id}/close`| `players.lives` + `players.active` for every player who lost a life; `games.status = 'finished'` if game over |
 
+### Authentication
+
+Auth lives in `internal/auth/`. Two modes controlled by `OIDC_ENABLED`:
+
+**Dev mode (`OIDC_ENABLED=false`, default):** `auth.Middleware` reads `X-Debug-Actor-Type` / `X-Debug-Actor-Id` request headers and populates the context with an `auth.Actor`. No session required.
+
+**OIDC mode (`OIDC_ENABLED=true`):** Standard Authorization Code Flow.
+1. `GET /auth/login` — generates `state`+`nonce`, stores them in a signed JWT cookie (`oauth2_state`), redirects to the OIDC provider.
+2. `GET /auth/callback` — verifies state cookie, exchanges code for ID token, validates nonce, issues a signed session JWT as `quizz_session` cookie (HttpOnly, 24h TTL), redirects to `OIDC_FRONTEND_URL`.
+3. `auth.Middleware` validates the `quizz_session` cookie on every protected request and sets the actor in context.
+4. `POST /auth/logout` — clears the cookie.
+
+Role mapping: the claim named `OIDC_ROLE_CLAIM` (default: `role`) is checked; if it equals `OIDC_ADMIN_ROLE` (default: `admin`), the actor gets `ActorTypeAdmin`, otherwise `ActorTypeUser`. Both scalar string and string array claim values are handled.
+
+All routes except `/health`, `/auth/login`, `/auth/callback`, and `/auth/logout` are protected by `auth.Middleware`.
+
+`extractActor` in `internal/handler/actor.go` reads the actor from the context set by the middleware — it is the only place handlers access identity.
+
 ### Question lists and access rules
 
 `QuestionListStore` (implemented by `postgres.DB`) manages the catalog:
 - Public lists: created by `admin` actors, readable by all
 - Private lists: created by `user` actors, visible only to the owning actor
-
-Auth is **not implemented**. Identity is simulated via `X-Debug-Actor-Type` / `X-Debug-Actor-Id` headers — see `internal/handler/actor.go`. Replace this with real middleware before production.
 
 ### WebSocket lifecycle
 
@@ -86,7 +102,7 @@ To add a migration: create `00N_name.sql`, embed it in `migrations.go`, and appe
 
 Vite + Vue 3 + TypeScript dev tool, not production code. All HTTP calls go through Vite's proxy (`/api/*` → backend, `/ws` → backend WS) so there are no CORS issues. `VITE_API_TARGET` controls the proxy target.
 
-The `actor` reactive state (`src/actor.ts`) holds the simulated identity and is injected as headers in every `api.ts` call.
+The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected as `X-Debug-Actor-*` headers in dev mode). `fetchSession()` calls `GET /auth/me` on mount and populates `sessionUser`. `ActorBar.vue` shows OIDC user info + logout when `oidc_enabled: true`, or the debug controls when `oidc_enabled: false`.
 
 ## Key design constraints
 

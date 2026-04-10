@@ -1,14 +1,5 @@
 package handler
 
-// NOTE: Authentication is not implemented.
-// Identity is simulated via dev-only HTTP headers:
-//
-//	X-Debug-Actor-Type: admin | user  (default: "user")
-//	X-Debug-Actor-Id:   <arbitrary string>  (default: "anonymous")
-//
-// These headers MUST NOT be trusted in a production deployment.
-// Replace this mechanism with real auth middleware before going to production.
-
 import (
 	"encoding/json"
 	"log/slog"

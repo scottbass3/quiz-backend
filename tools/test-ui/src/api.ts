@@ -7,7 +7,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   const t0 = Date.now()
   const id = crypto.randomUUID()
 
-  // Inject simulated identity headers on every request.
+  // X-Debug-Actor-* headers are only used by the backend when OIDC is disabled.
+  // When OIDC is enabled the session cookie takes precedence and these are ignored.
   const headers: Record<string, string> = {
     'X-Debug-Actor-Type': actor.type,
     'X-Debug-Actor-Id': actor.id,
@@ -90,4 +91,8 @@ export const api = {
     call<{ life_lost: string[]; eliminated: string[]; game_over: boolean; winner: string }>(
       'POST', `/games/${gameId}/close`
     ),
+
+  // ── Auth ───────────────────────────────────────────────────────────────────
+  logout: () =>
+    call<{ status: string }>('POST', '/auth/logout'),
 }

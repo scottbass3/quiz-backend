@@ -3,28 +3,23 @@ package handler
 import (
 	"net/http"
 
+	"github.com/scottbass3/quizz-backend/internal/auth"
 	"github.com/scottbass3/quizz-backend/internal/domain"
 )
 
-// devActor holds the simulated identity extracted from dev-only debug headers.
-// This is NOT secure — replace with real auth middleware before production.
+// devActor holds the resolved actor identity for use within a handler.
 type devActor struct {
 	Type domain.ActorType
 	ID   string
 }
 
-// extractActor reads the temporary identity simulation headers.
-//
-//	X-Debug-Actor-Type: admin | user  (default: "user")
-//	X-Debug-Actor-Id:   <string>      (default: "anonymous")
+// extractActor reads the Actor set by the auth middleware from the request context.
+// The middleware populates it from an OIDC session cookie (OIDC_ENABLED=true)
+// or from X-Debug-Actor-* headers (dev mode).
 func extractActor(r *http.Request) devActor {
-	t := r.Header.Get("X-Debug-Actor-Type")
-	id := r.Header.Get("X-Debug-Actor-Id")
-	if t != "admin" && t != "user" {
-		t = "user"
+	a := auth.ActorFromContext(r.Context())
+	if a == nil {
+		return devActor{Type: domain.ActorTypeUser, ID: "anonymous"}
 	}
-	if id == "" {
-		id = "anonymous"
-	}
-	return devActor{Type: domain.ActorType(t), ID: id}
+	return devActor{Type: a.ActorType, ID: a.Sub}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/scottbass3/quizz-backend/internal/auth"
 	"github.com/scottbass3/quizz-backend/internal/config"
 	"github.com/scottbass3/quizz-backend/internal/game"
 	"github.com/scottbass3/quizz-backend/internal/handler"
@@ -128,38 +129,80 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	var ps store.PlayerStore = pg
 	var qls store.QuestionListStore = pg
 
-	// Handlers
+	// ── Auth ────────────────────────────────────────────────────────────────────
+
+	sessionSecret := []byte(cfg.SessionSecret)
+	authMW := auth.Middleware(sessionSecret, cfg.OIDCEnabled)
+
+	var oidcProvider *auth.OIDCProvider
+	if cfg.OIDCEnabled {
+		p, err := auth.NewOIDCProvider(
+			context.Background(),
+			cfg.OIDCIssuerURL,
+			cfg.OIDCClientID,
+			cfg.OIDCClientSecret,
+			cfg.OIDCRedirectURL,
+			cfg.OIDCRoleClaim,
+			cfg.OIDCAdminRole,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("app: oidc: %w", err)
+		}
+		oidcProvider = p
+		logger.Info("OIDC enabled", "issuer", cfg.OIDCIssuerURL)
+	} else {
+		logger.Info("OIDC disabled — using X-Debug-Actor-* headers")
+	}
+
+	// ── Handlers ────────────────────────────────────────────────────────────────
+
 	gameH := handler.NewGameHandler(manager, sessions, gs, ps, qls, engineCfg, logger)
 	qlH := handler.NewQuestionListHandler(qls, logger)
 	healthH := handler.NewHealthHandler()
+	authH := handler.NewAuthHandler(oidcProvider, sessionSecret, cfg.OIDCFrontendURL, cfg.OIDCEnabled, logger)
 
-	// Router
+	// ── Router ──────────────────────────────────────────────────────────────────
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(requestLogger(logger))
 
+	// Public routes — no auth required.
 	r.Get("/health", healthH.Health)
 
-	r.Route("/games", func(r chi.Router) {
-		r.Post("/", gameH.CreateGame)
-		r.Get("/{id}", gameH.GetGame)
-		r.Post("/{id}/join", gameH.JoinGame)
-		r.Post("/{id}/start", gameH.StartNextQuestion)
-		r.Post("/{id}/close", gameH.CloseQuestion)
+	r.Route("/auth", func(r chi.Router) {
+		r.Get("/login", authH.Login)
+		r.Get("/callback", authH.Callback)
+		r.Post("/logout", authH.Logout)
+		// /auth/me requires the actor to be set in context.
+		r.With(authMW).Get("/me", authH.Me)
 	})
 
-	r.Route("/question-lists", func(r chi.Router) {
-		r.Post("/", qlH.Create)
-		r.Get("/public", qlH.ListPublic)
-		r.Get("/private", qlH.ListPrivate)
-		r.Get("/{id}", qlH.Get)
-		r.Get("/{id}/questions", qlH.ListQuestions)
-		r.Post("/{id}/questions", qlH.AddQuestion)
-	})
+	// Protected routes — auth middleware required.
+	r.Group(func(r chi.Router) {
+		r.Use(authMW)
 
-	r.Get("/ws", gameH.WebSocket)
+		r.Route("/games", func(r chi.Router) {
+			r.Post("/", gameH.CreateGame)
+			r.Get("/{id}", gameH.GetGame)
+			r.Post("/{id}/join", gameH.JoinGame)
+			r.Post("/{id}/start", gameH.StartNextQuestion)
+			r.Post("/{id}/close", gameH.CloseQuestion)
+		})
+
+		r.Route("/question-lists", func(r chi.Router) {
+			r.Post("/", qlH.Create)
+			r.Get("/public", qlH.ListPublic)
+			r.Get("/private", qlH.ListPrivate)
+			r.Get("/{id}", qlH.Get)
+			r.Get("/{id}/questions", qlH.ListQuestions)
+			r.Post("/{id}/questions", qlH.AddQuestion)
+		})
+
+		r.Get("/ws", gameH.WebSocket)
+	})
 
 	a.server = &http.Server{
 		Addr:         cfg.HTTPAddr,
