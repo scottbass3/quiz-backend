@@ -1,0 +1,16 @@
+FROM golang:1.23-alpine
+
+# git is the only build-time dependency needed by the Go toolchain
+RUN apk add --no-cache git
+
+WORKDIR /app
+
+# Pre-download project modules into the layer cache.
+# This layer is invalidated only when go.mod/go.sum change.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# air is invoked via `go run` so it is never compiled during `docker build`.
+# On first `docker compose up` it downloads into the mounted go_mod_cache volume
+# and is cached for all subsequent runs.
+CMD ["go", "run", "github.com/air-verse/air@v1.61.5", "-c", ".air.toml"]

@@ -1,0 +1,79 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-quizz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quizz}
+      POSTGRES_DB: ${POSTGRES_DB:-quizz}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quizz} -d ${POSTGRES_DB:-quizz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-quizz}:${POSTGRES_PASSWORD:-quizz}@postgres:5432/${POSTGRES_DB:-quizz}?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      GAME_INITIAL_LIVES: "${GAME_INITIAL_LIVES:-3}"
+    volumes:
+      - .:/app
+      - go_mod_cache:/go/pkg/mod
+    working_dir: /app
+
+  ui:
+    image: node:22-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${UI_PORT:-5173}:5173"
+    environment:
+      # Proxy target: inside Docker the API is reachable via the service name
+      VITE_API_TARGET: "http://api:8080"
+    volumes:
+      - ./tools/test-ui:/app
+      - node_modules:/app/node_modules
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+
+volumes:
+  postgres_data:
+  redis_data:
+  go_mod_cache:
+  node_modules:
