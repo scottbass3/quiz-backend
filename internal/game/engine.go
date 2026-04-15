@@ -22,7 +22,8 @@ var (
 )
 
 type EngineConfig struct {
-	InitialLives int
+	InitialLives          int
+	AnswerTimeoutSeconds  int // 0 = no timeout
 }
 
 // Broadcaster is implemented by the WebSocket hub.
@@ -140,20 +141,39 @@ func (e *Engine) StartNextQuestion() error {
 	e.game.CurrentQIdx = nextIdx
 	q := e.game.Questions[nextIdx]
 	total := len(e.game.Questions)
+	timeout := e.cfg.AnswerTimeoutSeconds
 	e.mu.Unlock()
 
-	event = domain.Event{
-		Type: domain.EventQuestionStarted,
-		Payload: map[string]any{
-			"question_id": q.ID,
-			"index":       nextIdx,
-			"total":       total,
-			"text":        q.Text,
-			"options":     q.Options,
-		},
+	payload := map[string]any{
+		"question_id": q.ID,
+		"index":       nextIdx,
+		"total":       total,
+		"text":        q.Text,
+		"options":     q.Options,
 	}
+	if timeout > 0 {
+		payload["answer_timeout_seconds"] = timeout
+	}
+	event = domain.Event{Type: domain.EventQuestionStarted, Payload: payload}
 
 	e.hub.Broadcast(event)
+
+	if timeout > 0 {
+		questionID := q.ID
+		go func() {
+			time.Sleep(time.Duration(timeout) * time.Second)
+			// Only auto-close if this question is still active.
+			e.mu.RLock()
+			stillActive := e.game.Status == domain.GameStatusRunning &&
+				e.game.CurrentQIdx >= 0 &&
+				e.game.Questions[e.game.CurrentQIdx].ID == questionID
+			e.mu.RUnlock()
+			if stillActive {
+				e.CloseQuestion() //nolint:errcheck
+			}
+		}()
+	}
+
 	return nil
 }
 

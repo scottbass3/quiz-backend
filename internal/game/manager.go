@@ -13,20 +13,19 @@ var ErrGameNotFound = errors.New("game not found")
 type Manager struct {
 	mu    sync.RWMutex
 	games map[string]*Engine
-	cfg   EngineConfig
 }
 
-func NewManager(cfg EngineConfig) *Manager {
+func NewManager() *Manager {
 	return &Manager{
 		games: make(map[string]*Engine),
-		cfg:   cfg,
 	}
 }
 
 // Create registers a new engine for the given game.
 // questions is the pre-loaded set from the question list.
-func (m *Manager) Create(gameID, ownerID, questionListID string, questions []*domain.Question, hub Broadcaster) *Engine {
-	eng := NewEngine(gameID, ownerID, questionListID, questions, m.cfg, hub)
+// cfg overrides the manager's default EngineConfig for this game.
+func (m *Manager) Create(gameID, ownerID, questionListID string, questions []*domain.Question, cfg EngineConfig, hub Broadcaster) *Engine {
+	eng := NewEngine(gameID, ownerID, questionListID, questions, cfg, hub)
 
 	m.mu.Lock()
 	m.games[gameID] = eng

@@ -70,8 +70,10 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 	a := extractActor(r)
 
 	var req struct {
-		OwnerName      string `json:"owner_name"`
-		QuestionListID string `json:"question_list_id"`
+		OwnerName            string `json:"owner_name"`
+		QuestionListID       string `json:"question_list_id"`
+		InitialLives         *int   `json:"initial_lives"`          // optional; defaults to cfg
+		AnswerTimeoutSeconds *int   `json:"answer_timeout_seconds"` // optional; 0 = no timeout
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OwnerName == "" {
 		writeError(w, http.StatusBadRequest, "owner_name is required")
@@ -80,6 +82,23 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 	if req.QuestionListID == "" {
 		writeError(w, http.StatusBadRequest, "question_list_id is required")
 		return
+	}
+
+	// Build per-game engine config, falling back to application defaults.
+	engineCfg := h.cfg
+	if req.InitialLives != nil {
+		if *req.InitialLives < 1 {
+			writeError(w, http.StatusBadRequest, "initial_lives must be at least 1")
+			return
+		}
+		engineCfg.InitialLives = *req.InitialLives
+	}
+	if req.AnswerTimeoutSeconds != nil {
+		if *req.AnswerTimeoutSeconds < 0 {
+			writeError(w, http.StatusBadRequest, "answer_timeout_seconds must be non-negative")
+			return
+		}
+		engineCfg.AnswerTimeoutSeconds = *req.AnswerTimeoutSeconds
 	}
 
 	// Load and validate the question list.
@@ -123,7 +142,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 
 	// GetOrCreate wires the Redis pub/sub broadcaster (for the engine) to the WS hub (for clients).
 	broadcaster, _ := h.sessions.GetOrCreate(gameID)
-	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, broadcaster)
+	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, engineCfg, broadcaster)
 
 	if err := eng.AddPlayer(ownerID, req.OwnerName); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to add owner")
@@ -147,7 +166,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 				ID:        ownerID,
 				GameID:    gameID,
 				Name:      req.OwnerName,
-				Lives:     h.cfg.InitialLives,
+				Lives:     engineCfg.InitialLives,
 				Active:    true,
 				CreatedAt: now,
 			}); err != nil {

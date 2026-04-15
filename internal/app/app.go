@@ -120,9 +120,9 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	sessions := newGameSessionStore(rdb, logger)
 	a.sessions = sessions
 
-	// Game layer
-	engineCfg := game.EngineConfig{InitialLives: cfg.GameInitialLives}
-	manager := game.NewManager(engineCfg)
+	// Game layer — default config; individual games may override via POST /games.
+	defaultEngineCfg := game.EngineConfig{InitialLives: cfg.GameInitialLives}
+	manager := game.NewManager()
 
 	// Stores
 	var gs store.GameStore = pg
@@ -156,7 +156,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 
 	// ── Handlers ────────────────────────────────────────────────────────────────
 
-	gameH := handler.NewGameHandler(manager, sessions, gs, ps, qls, engineCfg, logger)
+	gameH := handler.NewGameHandler(manager, sessions, gs, ps, qls, defaultEngineCfg, logger)
 	qlH := handler.NewQuestionListHandler(qls, logger)
 	healthH := handler.NewHealthHandler()
 	authH := handler.NewAuthHandler(oidcProvider, sessionSecret, cfg.OIDCFrontendURL, cfg.OIDCEnabled, logger)

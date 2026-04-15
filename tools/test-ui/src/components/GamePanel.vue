@@ -15,6 +15,8 @@ const props = defineProps<{
 
 // ── Create ──
 const ownerName = ref('Host')
+const initialLives = ref<number | ''>(3)
+const answerTimeout = ref<number | ''>(0)
 const creating = ref(false)
 const createError = ref('')
 
@@ -26,7 +28,10 @@ async function createGame() {
   creating.value = true
   createError.value = ''
   try {
-    const res = await api.createGame(ownerName.value.trim() || 'Host', props.selectedList.id)
+    const opts: { initialLives?: number; answerTimeoutSeconds?: number } = {}
+    if (initialLives.value !== '' && initialLives.value > 0) opts.initialLives = Number(initialLives.value)
+    if (answerTimeout.value !== '' && answerTimeout.value > 0) opts.answerTimeoutSeconds = Number(answerTimeout.value)
+    const res = await api.createGame(ownerName.value.trim() || 'Host', props.selectedList.id, opts)
     emit('game-created', res.game_id, res.owner_id)
   } catch (e) {
     createError.value = String(e)
@@ -109,9 +114,15 @@ async function closeQuestion() {
 
     <!-- Create -->
     <div class="label">create game</div>
-    <div class="row" style="margin-bottom: 8px">
+    <div class="row" style="margin-bottom: 6px">
       <input v-model="ownerName" type="text" placeholder="owner name" @keyup.enter="createGame" />
-      <button class="primary" @click="createGame" :disabled="creating || !selectedList">create</button>
+    </div>
+    <div class="row" style="margin-bottom: 6px">
+      <span style="font-size:11px; white-space:nowrap; color:var(--muted)">lives</span>
+      <input v-model.number="initialLives" type="number" min="1" placeholder="3" style="width:52px; flex:none" />
+      <span style="font-size:11px; white-space:nowrap; color:var(--muted)">timeout&nbsp;(s)</span>
+      <input v-model.number="answerTimeout" type="number" min="0" placeholder="∞" style="width:52px; flex:none" />
+      <button class="primary" @click="createGame" :disabled="creating || !selectedList" style="flex:1">create</button>
     </div>
     <div v-if="gameId" style="margin-bottom: 8px">
       <span class="label">game id</span>
