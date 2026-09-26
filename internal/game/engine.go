@@ -65,6 +65,10 @@ type Engine struct {
 	// lastActivity is the time of the last state change (join, question
 	// started/closed, answer). Used by Manager.Sweep to evict stale games.
 	lastActivity time.Time
+
+	// answerTimer auto-closes the open question after AnswerTimeoutSeconds.
+	// Armed on start, stopped on close. Guarded by mu.
+	answerTimer *time.Timer
 }
 
 // NewEngine creates a new game engine.
@@ -189,6 +193,12 @@ func (e *Engine) StartNextQuestion() error {
 	q := e.game.Questions[nextIdx]
 	total := len(e.game.Questions)
 	timeout := e.cfg.AnswerTimeoutSeconds
+	if timeout > 0 {
+		// Armed under the lock so a close racing with this start can stop it.
+		e.answerTimer = time.AfterFunc(time.Duration(timeout)*time.Second, func() {
+			e.closeQuestion(nextIdx) //nolint:errcheck // stale timers are expected to fail
+		})
+	}
 	e.lastActivity = time.Now()
 	e.mu.Unlock()
 
@@ -206,22 +216,6 @@ func (e *Engine) StartNextQuestion() error {
 	event = domain.Event{Type: domain.EventQuestionStarted, Payload: payload}
 
 	e.hub.Broadcast(event)
-
-	if timeout > 0 {
-		questionID := q.ID
-		go func() {
-			time.Sleep(time.Duration(timeout) * time.Second)
-			// Only auto-close if this question is still active.
-			e.mu.RLock()
-			stillActive := e.game.Status == domain.GameStatusRunning &&
-				e.game.CurrentQIdx >= 0 &&
-				e.game.Questions[e.game.CurrentQIdx].ID == questionID
-			e.mu.RUnlock()
-			if stillActive {
-				e.CloseQuestion() //nolint:errcheck
-			}
-		}()
-	}
 
 	return nil
 }
@@ -282,18 +276,29 @@ func (e *Engine) SubmitAnswer(playerID, questionID, optionID string) error {
 
 // CloseQuestion ends the current question, applies life penalties, and detects game over.
 func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
+	return e.closeQuestion(-1)
+}
+
+// closeQuestion closes the open question. When onlyIdx >= 0 it closes only if
+// that question is the open one, so a timer armed for an earlier question can
+// never close a later one. The check and the close happen under one lock.
+func (e *Engine) closeQuestion(onlyIdx int) (*CloseQuestionResult, error) {
 	e.mu.Lock()
 
 	if e.game.Status != domain.GameStatusRunning {
 		e.mu.Unlock()
 		return nil, ErrGameNotRunning
 	}
-	if !e.game.QuestionOpen {
+	if !e.game.QuestionOpen || (onlyIdx >= 0 && e.game.CurrentQIdx != onlyIdx) {
 		e.mu.Unlock()
 		return nil, ErrNoActiveQuestion
 	}
 
 	e.game.QuestionOpen = false
+	if e.answerTimer != nil {
+		e.answerTimer.Stop()
+		e.answerTimer = nil
+	}
 	q := e.game.Questions[e.game.CurrentQIdx]
 	result := &CloseQuestionResult{}
 
