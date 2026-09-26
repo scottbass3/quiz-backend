@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue'
 import { api } from '../api'
+import { actor } from '../actor'
 import type { WsEvent, EventLogEntry, ActiveQuestion, WsStatus } from '../types'
 
 const props = defineProps<{
@@ -13,6 +14,8 @@ const emit = defineEmits<{ (e: 'remove'): void }>()
 // ── Player state ──
 const playerName = ref(`Player ${props.slotIndex + 1}`)
 const playerId = ref('')
+// Debug actor used at join time: the backend only lets that actor connect as this player.
+const joinedAs = ref<{ type: string; id: string } | null>(null)
 const joined = ref(false)
 const joinError = ref('')
 const lives = ref<number | null>(null)
@@ -37,6 +40,7 @@ async function join() {
   try {
     const res = await api.joinGame(props.gameId, playerName.value.trim() || `Player${props.slotIndex + 1}`)
     playerId.value = res.player_id
+    joinedAs.value = { type: actor.type, id: actor.id }
     joined.value = true
   } catch (e) {
     joinError.value = String(e)
@@ -49,7 +53,14 @@ function connect() {
   if (ws.value) ws.value.close()
 
   wsStatus.value = 'connecting'
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?gameId=${props.gameId}&playerId=${playerId.value}`
+  const params = new URLSearchParams({ gameId: props.gameId, playerId: playerId.value })
+  // Browsers cannot send X-Debug-Actor-* headers on a WebSocket handshake, so the
+  // dev identity goes in the query string (ignored by the backend in OIDC mode).
+  if (joinedAs.value) {
+    params.set('debugActorType', joinedAs.value.type)
+    params.set('debugActorId', joinedAs.value.id)
+  }
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?${params}`
   const socket = new WebSocket(url)
   ws.value = socket
 

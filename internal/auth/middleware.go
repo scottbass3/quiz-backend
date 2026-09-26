@@ -38,9 +38,18 @@ func Middleware(secret []byte, oidcEnabled bool) func(http.Handler) http.Handler
 	}
 }
 
+// actorFromDebugHeaders reads the dev identity from X-Debug-Actor-* headers.
+// Browsers cannot set headers on a WebSocket handshake, so the
+// debugActorType / debugActorId query parameters are accepted as a fallback.
 func actorFromDebugHeaders(r *http.Request) *Actor {
 	t := r.Header.Get("X-Debug-Actor-Type")
 	id := r.Header.Get("X-Debug-Actor-Id")
+	if t == "" {
+		t = r.URL.Query().Get("debugActorType")
+	}
+	if id == "" {
+		id = r.URL.Query().Get("debugActorId")
+	}
 	if t != string(domain.ActorTypeAdmin) && t != string(domain.ActorTypeUser) {
 		t = string(domain.ActorTypeUser)
 	}

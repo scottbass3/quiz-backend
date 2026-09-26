@@ -125,7 +125,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 	broadcaster, _ := h.sessions.GetOrCreate(gameID)
 	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, broadcaster)
 
-	if err := eng.AddPlayer(ownerID, req.OwnerName); err != nil {
+	if err := eng.AddPlayer(ownerID, req.OwnerName, a.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to add owner")
 		return
 	}
@@ -166,6 +166,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 
 // POST /games/{id}/join
 func (h *GameHandler) JoinGame(w http.ResponseWriter, r *http.Request) {
+	a := extractActor(r)
 	gameID := chi.URLParam(r, "id")
 
 	var req struct {
@@ -187,7 +188,7 @@ func (h *GameHandler) JoinGame(w http.ResponseWriter, r *http.Request) {
 	}
 
 	playerID := uuid.NewString()
-	if err := eng.AddPlayer(playerID, req.PlayerName); err != nil {
+	if err := eng.AddPlayer(playerID, req.PlayerName, a.ID); err != nil {
 		switch {
 		case errors.Is(err, game.ErrGameAlreadyStarted):
 			writeError(w, http.StatusConflict, "game already started")
@@ -259,8 +260,9 @@ func (h *GameHandler) GetGame(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /games/{id}/start — advance to the next question
+// POST /games/{id}/start — advance to the next question (host only)
 func (h *GameHandler) StartNextQuestion(w http.ResponseWriter, r *http.Request) {
+	a := extractActor(r)
 	gameID := chi.URLParam(r, "id")
 
 	eng, err := h.manager.Get(gameID)
@@ -270,6 +272,11 @@ func (h *GameHandler) StartNextQuestion(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if eng.HostActorID() != a.ID {
+		writeError(w, http.StatusForbidden, "only the game host can start questions")
 		return
 	}
 
@@ -288,8 +295,9 @@ func (h *GameHandler) StartNextQuestion(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "question started"})
 }
 
-// POST /games/{id}/close — close the active question
+// POST /games/{id}/close — close the active question (host only)
 func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
+	a := extractActor(r)
 	gameID := chi.URLParam(r, "id")
 
 	eng, err := h.manager.Get(gameID)
@@ -299,6 +307,11 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if eng.HostActorID() != a.ID {
+		writeError(w, http.StatusForbidden, "only the game host can close questions")
 		return
 	}
 
@@ -334,7 +347,9 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /ws?gameId=...&playerId=...
+// The authenticated actor must be the one who created playerId.
 func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
+	a := extractActor(r)
 	gameID := r.URL.Query().Get("gameId")
 	playerID := r.URL.Query().Get("playerId")
 
@@ -349,9 +364,13 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap := eng.Snapshot()
-	if _, ok := snap.Players[playerID]; !ok {
+	actorID, ok := eng.PlayerActorID(playerID)
+	if !ok {
 		writeError(w, http.StatusForbidden, "player not in game")
+		return
+	}
+	if actorID != a.ID {
+		writeError(w, http.StatusForbidden, "player belongs to another actor")
 		return
 	}
 
@@ -372,17 +391,17 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	hub.Register(playerID, client)
 	defer hub.Unregister(playerID)
 
-	// Notify the player they have joined.
-	// BroadcastTo goes through Redis → subscriber → hub → WS client.
-	snap2 := eng.Snapshot()
+	// Notify the player they have joined. This goes straight to the local hub
+	// (not through Redis) so it arrives before the pumps start.
+	snap := eng.Snapshot()
 	hub.BroadcastTo(playerID, domain.Event{
 		Type: domain.EventGameJoined,
 		Payload: map[string]any{
 			"game_id":          gameID,
 			"player_id":        playerID,
-			"status":           snap2.Status,
-			"question_list_id": snap2.QuestionListID,
-			"total_questions":  len(snap2.Questions),
+			"status":           snap.Status,
+			"question_list_id": snap.QuestionListID,
+			"total_questions":  len(snap.Questions),
 		},
 	})
 

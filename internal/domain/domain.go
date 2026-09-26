@@ -64,11 +64,12 @@ type Game struct {
 }
 
 type Player struct {
-	ID     string
-	Name   string
-	Lives  int
-	Active bool
-	GameID string
+	ID      string
+	Name    string
+	Lives   int
+	Active  bool
+	GameID  string
+	ActorID string // authenticated actor who created this player (auth.Actor.Sub)
 }
 
 // Question holds both catalog metadata (QuestionListID, OrderIndex) and

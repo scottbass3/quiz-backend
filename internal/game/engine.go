@@ -84,7 +84,9 @@ func NewEngine(gameID, ownerID, questionListID string, questions []*domain.Quest
 	}
 }
 
-func (e *Engine) AddPlayer(id, name string) error {
+// AddPlayer registers a player owned by actorID (the authenticated actor who
+// joined). Only that actor may later act as this player over WebSocket.
+func (e *Engine) AddPlayer(id, name, actorID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -96,13 +98,36 @@ func (e *Engine) AddPlayer(id, name string) error {
 	}
 
 	e.game.Players[id] = &domain.Player{
-		ID:     id,
-		Name:   name,
-		Lives:  e.cfg.InitialLives,
-		Active: true,
-		GameID: e.game.ID,
+		ID:      id,
+		Name:    name,
+		Lives:   e.cfg.InitialLives,
+		Active:  true,
+		GameID:  e.game.ID,
+		ActorID: actorID,
 	}
 	return nil
+}
+
+// HostActorID returns the actor who owns the game's owner player, i.e. the
+// actor allowed to start and close questions. Empty until the owner is added.
+func (e *Engine) HostActorID() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if owner, ok := e.game.Players[e.game.OwnerID]; ok {
+		return owner.ActorID
+	}
+	return ""
+}
+
+// PlayerActorID returns the actor that owns playerID.
+func (e *Engine) PlayerActorID(playerID string) (string, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	p, ok := e.game.Players[playerID]
+	if !ok {
+		return "", false
+	}
+	return p.ActorID, true
 }
 
 // AddQuestion appends a question to the engine's runtime question list.

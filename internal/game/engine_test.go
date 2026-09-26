@@ -74,12 +74,12 @@ func TestAddPlayer(t *testing.T) {
 	hub := newStubHub()
 	eng := newEngine(hub)
 
-	if err := eng.AddPlayer("p1", "Alice"); err != nil {
+	if err := eng.AddPlayer("p1", "Alice", "actor-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// duplicate
-	if err := eng.AddPlayer("p1", "Alice"); err != game.ErrPlayerAlreadyJoined {
+	if err := eng.AddPlayer("p1", "Alice", "actor-1"); err != game.ErrPlayerAlreadyJoined {
 		t.Fatalf("expected ErrPlayerAlreadyJoined, got %v", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestStartNextQuestion(t *testing.T) {
 	hub := newStubHub()
 	eng := newEngine(hub)
 
-	eng.AddPlayer("p1", "Alice")
+	eng.AddPlayer("p1", "Alice", "actor-1")
 
 	if err := eng.StartNextQuestion(); err != game.ErrNoMoreQuestions {
 		t.Fatalf("expected ErrNoMoreQuestions, got %v", err)
@@ -110,7 +110,7 @@ func TestStartNextQuestion_PreloadedQuestions(t *testing.T) {
 	hub := newStubHub()
 	q := sampleQuestion()
 	eng := game.NewEngine("game-x", "owner-1", "list-1", []*domain.Question{q}, game.EngineConfig{InitialLives: 3}, hub)
-	eng.AddPlayer("p1", "Alice")
+	eng.AddPlayer("p1", "Alice", "actor-1")
 
 	if err := eng.StartNextQuestion(); err != nil {
 		t.Fatalf("unexpected error with preloaded questions: %v", err)
@@ -126,8 +126,8 @@ func TestSubmitAnswer_CorrectThenClose(t *testing.T) {
 	hub := newStubHub()
 	eng := newEngine(hub)
 
-	eng.AddPlayer("p1", "Alice")
-	eng.AddPlayer("p2", "Bob")
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
 	eng.AddQuestion(sampleQuestion())
 	q2 := sampleQuestion()
 	q2.ID = "q2"
@@ -171,8 +171,8 @@ func TestPlayerEliminated(t *testing.T) {
 	hub := newStubHub()
 	eng := game.NewEngine("game-2", "owner-1", "", nil, game.EngineConfig{InitialLives: 1}, hub)
 
-	eng.AddPlayer("p1", "Alice")
-	eng.AddPlayer("p2", "Bob")
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
 
 	q := sampleQuestion()
 	eng.AddQuestion(q)
@@ -201,7 +201,7 @@ func TestConcurrentSubmitAnswer(t *testing.T) {
 	eng := newEngine(hub)
 
 	for i := 0; i < 50; i++ {
-		eng.AddPlayer(string(rune('a'+i)), "player")
+		eng.AddPlayer(string(rune('a'+i)), "player", "actor-1")
 	}
 	eng.AddQuestion(sampleQuestion())
 	eng.StartNextQuestion()
@@ -235,7 +235,7 @@ func TestSnapshotIsolatedFromConcurrentMutations(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			eng.AddPlayer(string(rune('a'+i)), "player")
+			eng.AddPlayer(string(rune('a'+i)), "player", "actor-1")
 		}
 	}()
 	go func() {
@@ -262,8 +262,8 @@ func TestSnapshotIsolatedFromConcurrentMutations(t *testing.T) {
 func TestGameEndsAfterLastQuestion_LeaderWins(t *testing.T) {
 	hub := newStubHub()
 	eng := newEngine(hub)
-	eng.AddPlayer("p1", "Alice")
-	eng.AddPlayer("p2", "Bob")
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
 	eng.AddQuestion(sampleQuestion())
 	eng.StartNextQuestion()
 
@@ -299,8 +299,8 @@ func TestGameEndsAfterLastQuestion_LeaderWins(t *testing.T) {
 func TestGameEndsAfterLastQuestion_TieIsDraw(t *testing.T) {
 	hub := newStubHub()
 	eng := newEngine(hub)
-	eng.AddPlayer("p1", "Alice")
-	eng.AddPlayer("p2", "Bob")
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
 	eng.AddQuestion(sampleQuestion())
 	eng.StartNextQuestion()
 
@@ -319,5 +319,26 @@ func TestGameEndsAfterLastQuestion_TieIsDraw(t *testing.T) {
 	}
 	if len(result.Survivors) != 2 {
 		t.Fatalf("expected 2 survivors, got %v", result.Survivors)
+	}
+}
+
+func TestActorOwnership(t *testing.T) {
+	eng := newEngine(newStubHub()) // owner player id is "owner-1"
+
+	if got := eng.HostActorID(); got != "" {
+		t.Fatalf("expected no host before the owner joins, got %q", got)
+	}
+
+	eng.AddPlayer("owner-1", "Host", "actor-host")
+	eng.AddPlayer("p2", "Bob", "actor-bob")
+
+	if got := eng.HostActorID(); got != "actor-host" {
+		t.Fatalf("expected host actor-host, got %q", got)
+	}
+	if got, ok := eng.PlayerActorID("p2"); !ok || got != "actor-bob" {
+		t.Fatalf("expected p2 owned by actor-bob, got %q (found=%v)", got, ok)
+	}
+	if _, ok := eng.PlayerActorID("unknown"); ok {
+		t.Fatal("unknown player must not be found")
 	}
 }
