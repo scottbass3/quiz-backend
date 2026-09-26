@@ -49,7 +49,7 @@ func (emptyListStore) ListQuestions(context.Context, string) ([]store.QuestionRe
 func TestCreateGame_RejectsEmptyList(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := game.EngineConfig{InitialLives: 3}
-	h := NewGameHandler(game.NewManager(cfg), nil, nil, nil, emptyListStore{}, cfg, logger)
+	h := NewGameHandler(game.NewManager(), nil, nil, nil, emptyListStore{}, cfg, logger)
 
 	req := httptest.NewRequest(http.MethodPost, "/games", strings.NewReader(`{"owner_name":"Alice","question_list_id":"list-1"}`))
 	rec := httptest.NewRecorder()

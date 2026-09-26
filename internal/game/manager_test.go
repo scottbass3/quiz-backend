@@ -10,10 +10,11 @@ import (
 
 func TestManagerSweep(t *testing.T) {
 	const finishedTTL, idleTTL = 10 * time.Minute, 2 * time.Hour
-	m := game.NewManager(game.EngineConfig{InitialLives: 3})
+	cfg := game.EngineConfig{InitialLives: 3}
+	m := game.NewManager()
 
 	// A finished game: one question, played and closed.
-	finished := m.Create("finished", "owner", "", []*domain.Question{sampleQuestion()}, newStubHub())
+	finished := m.Create("finished", "owner", "", []*domain.Question{sampleQuestion()}, cfg, newStubHub())
 	finished.AddPlayer("owner", "Host", "actor-1")
 	finished.StartNextQuestion()
 	if res, err := finished.CloseQuestion(); err != nil || !res.GameOver {
@@ -21,7 +22,7 @@ func TestManagerSweep(t *testing.T) {
 	}
 
 	// A game still waiting for players.
-	m.Create("waiting", "owner", "", []*domain.Question{sampleQuestion()}, newStubHub())
+	m.Create("waiting", "owner", "", []*domain.Question{sampleQuestion()}, cfg, newStubHub())
 
 	now := time.Now()
 

@@ -73,10 +73,18 @@ export const api = {
     }),
 
   // ── Games ──────────────────────────────────────────────────────────────────
-  createGame: (ownerName: string, questionListId: string) =>
-    call<{ game_id: string; owner_id: string; question_list_id: string; total_questions: number }>(
-      'POST', '/games', { owner_name: ownerName, question_list_id: questionListId }
-    ),
+  createGame: (
+    ownerName: string,
+    questionListId: string,
+    options?: { initialLives?: number; answerTimeoutSeconds?: number },
+  ) => {
+    const body: Record<string, unknown> = { owner_name: ownerName, question_list_id: questionListId }
+    if (options?.initialLives !== undefined) body.initial_lives = options.initialLives
+    if (options?.answerTimeoutSeconds !== undefined) body.answer_timeout_seconds = options.answerTimeoutSeconds
+    return call<{ game_id: string; owner_id: string; question_list_id: string; total_questions: number }>(
+      'POST', '/games', body,
+    )
+  },
 
   getGame: (id: string) =>
     call<Record<string, unknown>>('GET', `/games/${id}`),
