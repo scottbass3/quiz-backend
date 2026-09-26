@@ -1,4 +1,4 @@
-.PHONY: up down logs ui-logs test fmt lint migrate-up migrate-down build load-test load-test-health load-test-lists load-test-game load-test-room
+.PHONY: up down logs ui-logs test fmt lint migrate-up build load-test load-test-game load-test-room shell
 
 # ── Docker Compose ──────────────────────────────────────────────────────────
 
@@ -67,7 +67,7 @@ load-test-room:
 		-e ANSWER_MAX_MS=$(ANSWER_MAX_MS) \
 		-e CLOSE_DELAY_MS=$(CLOSE_DELAY_MS)
 
-load-test: load-test-health load-test-lists load-test-game
+load-test: load-test-game load-test-room
 
 # ── Shell into the running API container ────────────────────────────────────
 
