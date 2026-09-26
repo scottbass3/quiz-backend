@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -148,6 +149,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 	// GetOrCreate wires the Redis pub/sub broadcaster (for the engine) to the WS hub (for clients).
 	broadcaster, _ := h.sessions.GetOrCreate(gameID)
 	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, engineCfg, broadcaster)
+	eng.OnQuestionClosed(func(res *game.CloseQuestionResult) { h.persistClose(gameID, res) })
 
 	if err := eng.AddPlayer(ownerID, req.OwnerName, a.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to add owner")
@@ -348,22 +350,8 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort: persist player life changes.
-	if h.playerStore != nil {
-		for _, delta := range result.LifeDeltas {
-			if err := h.playerStore.UpdatePlayerLives(r.Context(), delta.PlayerID, delta.LivesLeft, delta.Active); err != nil {
-				h.logger.Error("update player lives in postgres", "error", err, "player_id", delta.PlayerID)
-			}
-		}
-	}
-
-	// Best-effort: persist game status if the game is now finished.
-	if result.GameOver && h.gameStore != nil {
-		if err := h.gameStore.UpdateGameStatus(r.Context(), gameID, string(domain.GameStatusFinished)); err != nil {
-			h.logger.Error("update game status (finished) in postgres", "error", err, "game_id", gameID)
-		}
-	}
-
+	// Persistence of the result happens in persistClose, registered on the
+	// engine at creation so that timeout closes are persisted too.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"life_lost":           result.LifeLost,
 		"eliminated":          result.Eliminated,
@@ -373,6 +361,31 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 		"reason":              result.Reason,
 		"remaining_questions": result.RemainingQuestions,
 	})
+}
+
+// persistTimeout bounds best-effort writes made outside a request (e.g. when
+// the answer timer closes a question).
+const persistTimeout = 5 * time.Second
+
+// persistClose saves the outcome of a question close (lives, game status).
+// Registered with Engine.OnQuestionClosed, so it runs for manual closes and
+// for answer timeouts alike. Best-effort: errors are logged.
+func (h *GameHandler) persistClose(gameID string, result *game.CloseQuestionResult) {
+	ctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
+	defer cancel()
+
+	if h.playerStore != nil {
+		for _, delta := range result.LifeDeltas {
+			if err := h.playerStore.UpdatePlayerLives(ctx, delta.PlayerID, delta.LivesLeft, delta.Active); err != nil {
+				h.logger.Error("update player lives in postgres", "error", err, "player_id", delta.PlayerID)
+			}
+		}
+	}
+	if result.GameOver && h.gameStore != nil {
+		if err := h.gameStore.UpdateGameStatus(ctx, gameID, string(domain.GameStatusFinished)); err != nil {
+			h.logger.Error("update game status (finished) in postgres", "error", err, "game_id", gameID)
+		}
+	}
 }
 
 // writeGameError maps an engine state error to 409 with a stable code the

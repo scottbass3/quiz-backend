@@ -69,6 +69,20 @@ type Engine struct {
 	// answerTimer auto-closes the open question after AnswerTimeoutSeconds.
 	// Armed on start, stopped on close. Guarded by mu.
 	answerTimer *time.Timer
+
+	// onQuestionClosed is called after every close, manual or by timeout.
+	// Guarded by mu.
+	onQuestionClosed func(*CloseQuestionResult)
+}
+
+// OnQuestionClosed registers fn to be called after every question close,
+// whether triggered by CloseQuestion or by the answer timeout. It runs on the
+// closing goroutine after events are broadcast and the lock is released.
+// Used for persistence, which the engine itself knows nothing about.
+func (e *Engine) OnQuestionClosed(fn func(*CloseQuestionResult)) {
+	e.mu.Lock()
+	e.onQuestionClosed = fn
+	e.mu.Unlock()
 }
 
 // NewEngine creates a new game engine.
@@ -360,6 +374,7 @@ func (e *Engine) closeQuestion(onlyIdx int) (*CloseQuestionResult, error) {
 	gameOver := result.GameOver
 
 	e.lastActivity = time.Now()
+	onClose := e.onQuestionClosed
 	e.mu.Unlock()
 
 	// Broadcast events after releasing the lock.
@@ -399,6 +414,9 @@ func (e *Engine) closeQuestion(onlyIdx int) (*CloseQuestionResult, error) {
 		})
 	}
 
+	if onClose != nil {
+		onClose(result)
+	}
 	return result, nil
 }
 
