@@ -83,7 +83,7 @@ async function closeQuestion() {
     const parts: string[] = []
     if (res.life_lost?.length)  parts.push(`-1 life: ${res.life_lost.join(', ')}`)
     if (res.eliminated?.length) parts.push(`eliminated: ${res.eliminated.join(', ')}`)
-    if (res.game_over)          parts.push(`game over → winner: ${res.winner || 'none'}`)
+    if (res.game_over)          parts.push(`game over → winner: ${res.winner || 'none (draw)'}, survivors: ${res.survivors?.length ?? 0}`)
     controlMsg.value = parts.length ? parts.join(' | ') : 'closed ✓'
   } catch (e) {
     controlMsg.value = String(e)

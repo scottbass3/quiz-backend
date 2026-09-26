@@ -329,6 +329,7 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 		"eliminated": result.Eliminated,
 		"game_over":  result.GameOver,
 		"winner":     result.Winner,
+		"survivors":  result.Survivors,
 	})
 }
 

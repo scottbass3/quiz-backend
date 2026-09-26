@@ -45,7 +45,8 @@ type CloseQuestionResult struct {
 	LifeDeltas []LifeDelta // detailed life info for persistence
 	Eliminated []string    // player IDs who reached 0 lives
 	GameOver   bool
-	Winner     string // empty if draw / no survivors
+	Winner     string   // empty if draw / no survivors
+	Survivors  []string // active players when the game ended (set only if GameOver)
 }
 
 type Engine struct {
@@ -241,13 +242,16 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 		}
 	}
 
+	// The game ends when at most one player is left, or when the last question
+	// has been played. In the latter case the survivor with the most lives wins;
+	// a tie on lives is a draw (no winner).
 	active := e.activePlayers()
-	if len(active) <= 1 {
+	lastQuestion := e.game.CurrentQIdx == len(e.game.Questions)-1
+	if len(active) <= 1 || lastQuestion {
 		e.game.Status = domain.GameStatusFinished
 		result.GameOver = true
-		if len(active) == 1 {
-			result.Winner = active[0]
-		}
+		result.Survivors = active
+		result.Winner = e.leaderLocked(active)
 	}
 
 	// Snapshot data needed for events and persistence before releasing the lock.
@@ -303,6 +307,7 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 			Type: domain.EventGameOver,
 			Payload: map[string]any{
 				"winner_id": winner,
+				"survivors": result.Survivors,
 			},
 		})
 	}
@@ -333,6 +338,24 @@ func (e *Engine) Snapshot() domain.Game {
 		g.Questions[i] = &cq
 	}
 	return g
+}
+
+// leaderLocked returns the player with strictly the most lives among ids,
+// or "" if ids is empty or the top is tied. Caller must hold the lock.
+func (e *Engine) leaderLocked(ids []string) string {
+	leader, best, tied := "", -1, false
+	for _, id := range ids {
+		switch lives := e.game.Players[id].Lives; {
+		case lives > best:
+			leader, best, tied = id, lives, false
+		case lives == best:
+			tied = true
+		}
+	}
+	if tied {
+		return ""
+	}
+	return leader
 }
 
 func (e *Engine) activePlayers() []string {

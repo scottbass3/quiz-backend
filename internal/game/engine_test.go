@@ -129,6 +129,9 @@ func TestSubmitAnswer_CorrectThenClose(t *testing.T) {
 	eng.AddPlayer("p1", "Alice")
 	eng.AddPlayer("p2", "Bob")
 	eng.AddQuestion(sampleQuestion())
+	q2 := sampleQuestion()
+	q2.ID = "q2"
+	eng.AddQuestion(q2) // a second question keeps the game running after close
 	eng.StartNextQuestion()
 	hub.events = nil // reset after question_started
 
@@ -253,5 +256,68 @@ func TestSnapshotIsolatedFromConcurrentMutations(t *testing.T) {
 	snap.Players["a"].Lives = 0
 	if eng.Snapshot().Players["a"].Lives != 3 {
 		t.Fatal("mutating a snapshot must not affect engine state")
+	}
+}
+
+func TestGameEndsAfterLastQuestion_LeaderWins(t *testing.T) {
+	hub := newStubHub()
+	eng := newEngine(hub)
+	eng.AddPlayer("p1", "Alice")
+	eng.AddPlayer("p2", "Bob")
+	eng.AddQuestion(sampleQuestion())
+	eng.StartNextQuestion()
+
+	// p2 answers wrong but keeps 2 lives: nobody is eliminated.
+	eng.SubmitAnswer("p1", "q1", "b")
+	eng.SubmitAnswer("p2", "q1", "a")
+	result, err := eng.CloseQuestion()
+	if err != nil {
+		t.Fatalf("close question error: %v", err)
+	}
+
+	if !result.GameOver {
+		t.Fatal("game should be over after the last question")
+	}
+	if result.Winner != "p1" {
+		t.Fatalf("expected p1 (most lives) to win, got %q", result.Winner)
+	}
+	if len(result.Survivors) != 2 {
+		t.Fatalf("expected 2 survivors, got %v", result.Survivors)
+	}
+	if eng.Snapshot().Status != domain.GameStatusFinished {
+		t.Fatal("game status should be finished")
+	}
+	if err := eng.StartNextQuestion(); err != game.ErrGameFinished {
+		t.Fatalf("expected ErrGameFinished, got %v", err)
+	}
+	types := hub.broadcastTypes()
+	if types[len(types)-1] != domain.EventGameOver {
+		t.Fatalf("expected game_over as last event, got %v", types)
+	}
+}
+
+func TestGameEndsAfterLastQuestion_TieIsDraw(t *testing.T) {
+	hub := newStubHub()
+	eng := newEngine(hub)
+	eng.AddPlayer("p1", "Alice")
+	eng.AddPlayer("p2", "Bob")
+	eng.AddQuestion(sampleQuestion())
+	eng.StartNextQuestion()
+
+	eng.SubmitAnswer("p1", "q1", "b")
+	eng.SubmitAnswer("p2", "q1", "b")
+	result, err := eng.CloseQuestion()
+	if err != nil {
+		t.Fatalf("close question error: %v", err)
+	}
+
+	if !result.GameOver {
+		t.Fatal("game should be over after the last question")
+	}
+	if result.Winner != "" {
+		t.Fatalf("expected a draw, got winner %q", result.Winner)
+	}
+	if len(result.Survivors) != 2 {
+		t.Fatalf("expected 2 survivors, got %v", result.Survivors)
 	}
 }

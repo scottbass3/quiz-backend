@@ -88,7 +88,7 @@ export const api = {
     call<unknown>('POST', `/games/${gameId}/start`),
 
   closeQuestion: (gameId: string) =>
-    call<{ life_lost: string[]; eliminated: string[]; game_over: boolean; winner: string }>(
+    call<{ life_lost: string[]; eliminated: string[]; game_over: boolean; winner: string; survivors: string[] | null }>(
       'POST', `/games/${gameId}/close`
     ),
 
