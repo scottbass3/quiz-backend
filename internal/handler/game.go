@@ -108,7 +108,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "question list not found")
 		return
 	}
-	if list.Visibility == "private" && list.OwnerID != a.ID {
+	if !canReadList(a, list) {
 		writeError(w, http.StatusForbidden, "cannot use another user's private list")
 		return
 	}

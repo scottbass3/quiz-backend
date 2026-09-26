@@ -121,7 +121,7 @@ func (h *QuestionListHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "question list not found")
 		return
 	}
-	if list.Visibility == "private" && list.OwnerID != a.ID {
+	if !canReadList(a, list) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
@@ -139,7 +139,7 @@ func (h *QuestionListHandler) ListQuestions(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, "question list not found")
 		return
 	}
-	if list.Visibility == "private" && list.OwnerID != a.ID {
+	if !canReadList(a, list) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
@@ -170,12 +170,12 @@ func (h *QuestionListHandler) AddQuestion(w http.ResponseWriter, r *http.Request
 	// Write-access rules:
 	// - Public list: only admins can add questions.
 	// - Private list: only the owner can add questions.
-	if list.Visibility == "public" && a.Type != domain.ActorTypeAdmin {
-		writeError(w, http.StatusForbidden, "only admins can add questions to public lists")
-		return
-	}
-	if list.Visibility == "private" && list.OwnerID != a.ID {
-		writeError(w, http.StatusForbidden, "access denied")
+	if !canEditList(a, list) {
+		if list.Visibility == string(domain.ListVisibilityPublic) {
+			writeError(w, http.StatusForbidden, "only admins can add questions to public lists")
+		} else {
+			writeError(w, http.StatusForbidden, "access denied")
+		}
 		return
 	}
 
