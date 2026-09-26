@@ -25,7 +25,8 @@ HTTP/WS request
 
 **Catalog** (persisted in Postgres):
 - `question_lists` table: name, visibility, owner
-- `question_list_questions` table: ordered questions per list
+- `question_list_questions` table: ordered questions per list, optional `theme_id`
+- `themes` table: `question_list_id IS NULL` is a global theme, otherwise a custom theme of that list (exposed as `scope`: `global` / `list`)
 
 **Runtime** (in-memory only):
 - `game.Engine`: holds a copy of the questions loaded from the list at game creation, plus player state and answers
@@ -115,6 +116,16 @@ Docker Compose only passes the variables listed under `api.environment` in `dock
 - Public lists: created by `admin` actors, readable by all
 - Private lists: created by `user` actors, visible only to the owning actor
 
+Always use `canReadList` / `canEditList` (`internal/handler/actor.go`) for these rules; do not re-implement them inline.
+
+### Themes
+
+`ThemeStore` (implemented in `internal/postgres/themes.go`) and `handler.ThemeHandler` serve `/themes` (global, admin-managed) and `/question-lists/{id}/themes` (custom, managed by list editors). Each route only sees themes of its own scope (404 otherwise). A question's `theme_id` must be global or belong to the question's list: `QuestionListHandler.checkTheme` enforces it on create and update (`theme_not_found`, `theme_from_another_list`). Names are unique per scope, case-insensitive (partial unique indexes, mapped to `store.ErrConflict` → 409 `theme_name_taken`). Deleting a theme sets `theme_id` to NULL on its questions (FK `ON DELETE SET NULL`).
+
+Postgres errors are translated by `mapError` into `store.ErrNotFound` / `store.ErrConflict`; handlers switch on those, never on driver errors.
+
+Handler tests use `memStore` (`internal/handler/memstore_test.go`), an in-memory store mirroring these constraints, behind a real chi router and the dev auth middleware (`catalogServer`).
+
 ### WebSocket lifecycle
 
 Each game has one `ws.Hub` (held in `app.gameSessionStore`). When a player connects to `/ws?gameId=&playerId=`:
@@ -126,7 +137,7 @@ Each game has one `ws.Hub` (held in `app.gameSessionStore`). When a player conne
 
 ### Migrations
 
-SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Two files are concatenated: `001_initial.sql` (base tables) and `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`). `app.New()` calls `pg.RunMigrations()` on every startup, which is safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
+SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Three files are concatenated: `001_initial.sql` (base tables), `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`) and `003_themes.sql` (`themes` table + `theme_id` on questions). `app.New()` calls `pg.RunMigrations()` on every startup, which is safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
 
 To add a migration: create `00N_name.sql`, embed it in `migrations.go`, and append it to `SQL`.
 
@@ -140,7 +151,7 @@ The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected a
 
 - `game.Engine` has no knowledge of transport (HTTP/WS) or storage: it takes a `Broadcaster` interface.
 - `game.Broadcaster` is the only coupling point between game logic and delivery. `redis.PubSubBroadcaster` implements it in the app; `ws.Hub` implements it too and is what the Redis subscriber forwards to.
-- `store.GameStore` / `PlayerStore` / `QuestionListStore` are interfaces; `postgres.DB` implements all three. `GameStore` and `PlayerStore` may be `nil` in handler tests.
+- `store.GameStore` / `PlayerStore` / `QuestionListStore` / `ThemeStore` are interfaces; `postgres.DB` implements all four. `GameStore` and `PlayerStore` may be `nil` in handler tests.
 - `game.Engine.AddQuestion` is kept for test convenience only; HTTP no longer exposes it. Production games get their questions from the list at creation time.
 - The `go build` in `.air.toml` uses `-buildvcs=false`, required because the container can't access git metadata.
 

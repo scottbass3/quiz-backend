@@ -11,7 +11,7 @@ Players join a game, answer multiple-choice questions over WebSocket and lose a 
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
 - [Authentication](#authentication)
-- [HTTP API](#http-api)
+- [HTTP API](#http-api) (including [themes](#themes))
 - [WebSocket](#websocket)
 - [Test UI](#test-ui)
 - [Test scenarios](#test-scenarios)
@@ -73,7 +73,7 @@ HTTP / WS request
 
 ### Key design decisions
 
-- **Catalog vs runtime.** Question lists live in Postgres. A game copies the questions of its list once, at creation, and never reads Postgres again for them.
+- **Catalog vs runtime.** Question lists, their questions and themes live in Postgres. A game copies the questions of its list (with their theme) once, at creation, and never reads Postgres again for them.
 - **In-memory game state.** Each game is a `game.Engine` guarded by a `sync.RWMutex`. Events are broadcast *after* the lock is released to avoid contention with the hub.
 - **Transport-agnostic engine.** The engine only knows a `Broadcaster` interface. In the app it is backed by Redis pub/sub: the engine publishes to `game:<id>:events`, a subscriber goroutine forwards each event to the local `ws.Hub`, which writes to the WebSocket clients.
 - **One hub per game.** Each game has its own hub and Redis subscription, created with the game and released when the game is evicted.
@@ -206,10 +206,10 @@ GET /health
 
 ### Question lists
 
-| Visibility | Created by            | Readable by | Questions added by |
-|------------|-----------------------|-------------|--------------------|
-| `public`   | `admin` actors only   | everyone    | any `admin` actor  |
-| `private`  | `user` actors only    | its owner   | its owner          |
+| Visibility | Created by            | Readable by | Edited by (questions, custom themes) |
+|------------|-----------------------|-------------|--------------------------------------|
+| `public`   | `admin` actors only   | everyone    | any `admin` actor                    |
+| `private`  | `user` actors only    | its owner   | its owner                            |
 
 ```
 POST /question-lists
@@ -232,25 +232,83 @@ GET /question-lists/private
 
 ```
 GET /question-lists/{id}
-GET /question-lists/{id}/questions
-→ 200 list metadata / ordered questions (including correct_option_id)
+→ 200 list metadata
   403 private list owned by someone else
   404 unknown list
 ```
+
+```
+GET /question-lists/{id}/questions[?theme_id=<id>|none]
+→ 200 [ { "id", "question_list_id", "text", "options", "correct_option_id", "order_index",
+          "theme": { "id", "name", "scope" } | null }, ... ]
+  403 private list owned by someone else
+  404 unknown list
+```
+
+Questions are ordered by `order_index`. `theme_id=<id>` keeps the questions of one theme, `theme_id=none` the questions without theme.
 
 ```
 POST /question-lists/{id}/questions
 {
   "text": "Capital of France?",
   "options": [{"id":"a","text":"London"},{"id":"b","text":"Paris"},{"id":"c","text":"Berlin"}],
-  "correct_option_id": "b"
+  "correct_option_id": "b",
+  "theme_id": "..."
 }
 → 201 { "question_id": "..." }
   400 missing text, fewer than 2 options or missing correct_option_id
+  400 correct_option_id matches no option, or duplicate option ids
+  400 code=theme_not_found / code=theme_from_another_list
   403 not allowed to edit this list
 ```
 
-Option IDs are generated when left empty. Questions are appended at the end of the list.
+```
+PUT /question-lists/{id}/questions/{questionID}
+(same body as POST)
+→ 200 the updated question, as returned by GET .../questions
+  400 same validation as POST
+  403 not allowed to edit this list
+  404 unknown list, or question not in this list
+```
+
+Option IDs are generated when left empty. New questions are appended at the end of the list; `PUT` replaces the text, options, correct option and theme but keeps the position. `theme_id` is optional on both: omit it (or send `null` or `""`) for a question without theme, which also removes the theme on `PUT`.
+
+### Themes
+
+Themes categorize questions. They come in two scopes, returned as `scope`:
+
+| Scope    | Route                                  | Readable by              | Managed by        |
+|----------|----------------------------------------|--------------------------|-------------------|
+| `global` | `/themes`                              | everyone                 | `admin` actors    |
+| `list`   | `/question-lists/{id}/themes`          | readers of that list     | editors of that list |
+
+A question references at most one theme, which must be a global theme or a custom theme of **its own** list. Names are trimmed, required, at most 100 characters and unique per scope, ignoring case: two lists may both have a "History" theme, and so may a list and the global scope.
+
+Both routes offer the same operations:
+
+```
+GET    /themes                          GET    /question-lists/{id}/themes
+POST   /themes                          POST   /question-lists/{id}/themes
+GET    /themes/{themeID}                GET    /question-lists/{id}/themes/{themeID}
+PUT    /themes/{themeID}                PUT    /question-lists/{id}/themes/{themeID}
+DELETE /themes/{themeID}                DELETE /question-lists/{id}/themes/{themeID}
+```
+
+```
+POST / PUT body:  { "name": "Geography", "description": "optional" }
+Theme:            { "id", "scope", "question_list_id" (list scope only), "name", "description", "created_at", "updated_at" }
+
+GET list   → 200 [ ...themes ] sorted by name
+POST       → 201 theme
+GET / PUT  → 200 theme
+DELETE     → 204
+  400 missing or too long name
+  403 not allowed to read or manage this scope
+  404 unknown theme, or theme of another scope (a list theme is not reachable through /themes or another list)
+  409 code=theme_name_taken
+```
+
+Deleting a theme never fails because of questions: they are simply left without theme. Deleting a list is not supported, but would delete its custom themes.
 
 ### Games
 
@@ -333,7 +391,7 @@ Every event has the shape `{ "type": "...", "payload": { ... } }`.
 | `type`              | Sent to      | Payload                                                           |
 |---------------------|--------------|-------------------------------------------------------------------|
 | `game_joined`       | that player  | `game_id`, `player_id`, `status`, `question_list_id`, `total_questions` |
-| `question_started`  | everyone     | `question_id`, `index`, `total`, `is_last`, `text`, `options`, `answer_timeout_seconds` (only when the game has a timeout) |
+| `question_started`  | everyone     | `question_id`, `index`, `total`, `is_last`, `text`, `options`, `theme` (`{ id, name, scope }` or `null`), `answer_timeout_seconds` (only when the game has a timeout) |
 | `answer_submitted`  | everyone     | `player_id`, `question_id` (correctness is not revealed)          |
 | `question_closed`   | everyone     | `question_id`, `correct_option_id`, `remaining_questions`         |
 | `life_lost`         | that player  | `player_id`, `lives_left`                                         |
@@ -428,4 +486,4 @@ make migrate-up   # restart the API, which re-applies migrations
 - **Single instance per game.** Events go through Redis pub/sub, but a game's state lives in the memory of the instance that created it. Running several API instances requires routing every request of a game (HTTP and WebSocket) to the same instance.
 - **Development defaults.** The session cookie is not marked `Secure`, the WebSocket upgrader accepts any origin and `SESSION_SECRET` has a public default. All three must be changed before a public deployment.
 - **Answers are readable.** `GET /question-lists/{id}/questions` returns `correct_option_id`, so any actor who can read a public list can see its answers.
-- **Catalog editing.** Question lists and questions can be created but not edited, reordered or deleted through the API.
+- **Catalog editing.** Questions can be created and updated but not reordered or deleted; question lists can only be created. The test UI does not manage themes yet.
