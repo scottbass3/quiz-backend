@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/scottbass3/quizz-backend/internal/store"
 )
 
-// DB wraps a pgxpool and implements the store interfaces.
+// DB wraps a pgxpool and implements the store interfaces (themes in themes.go).
 type DB struct {
 	pool *pgxpool.Pool
 }
@@ -205,9 +206,9 @@ func (db *DB) CreateQuestion(ctx context.Context, q store.QuestionRecord) error 
 		return fmt.Errorf("postgres: marshal options: %w", err)
 	}
 	_, err = db.pool.Exec(ctx,
-		`INSERT INTO question_list_questions (id, question_list_id, text, options, correct_option_id, order_index)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		q.ID, q.QuestionListID, q.Text, optionsJSON, q.CorrectOptionID, q.OrderIndex,
+		`INSERT INTO question_list_questions (id, question_list_id, text, options, correct_option_id, order_index, theme_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		q.ID, q.QuestionListID, q.Text, optionsJSON, q.CorrectOptionID, q.OrderIndex, nullableText(q.ThemeID),
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: create question: %w", err)
@@ -215,11 +216,44 @@ func (db *DB) CreateQuestion(ctx context.Context, q store.QuestionRecord) error 
 	return nil
 }
 
+func (db *DB) UpdateQuestion(ctx context.Context, q store.QuestionRecord) error {
+	optionsJSON, err := json.Marshal(q.Options)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal options: %w", err)
+	}
+	tag, err := db.pool.Exec(ctx,
+		`UPDATE question_list_questions
+		 SET text = $1, options = $2, correct_option_id = $3, theme_id = $4
+		 WHERE id = $5`,
+		q.Text, optionsJSON, q.CorrectOptionID, nullableText(q.ThemeID), q.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update question: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: update question: %w", store.ErrNotFound)
+	}
+	return nil
+}
+
+// questionSelect reads questions with their optional theme.
+const questionSelect = `
+	SELECT q.id, q.question_list_id, q.text, q.options, q.correct_option_id, q.order_index,
+	       COALESCE(t.id, ''), COALESCE(t.name, ''), COALESCE(t.question_list_id, '')
+	FROM question_list_questions q
+	LEFT JOIN themes t ON t.id = q.theme_id`
+
+func (db *DB) GetQuestion(ctx context.Context, id string) (*store.QuestionRecord, error) {
+	q, err := scanQuestion(db.pool.QueryRow(ctx, questionSelect+` WHERE q.id = $1`, id))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get question: %w", mapError(err))
+	}
+	return q, nil
+}
+
 func (db *DB) ListQuestions(ctx context.Context, listID string) ([]store.QuestionRecord, error) {
 	rows, err := db.pool.Query(ctx,
-		`SELECT id, question_list_id, text, options, correct_option_id, order_index
-		 FROM question_list_questions
-		 WHERE question_list_id = $1 ORDER BY order_index ASC`, listID)
+		questionSelect+` WHERE q.question_list_id = $1 ORDER BY q.order_index ASC`, listID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list questions: %w", err)
 	}
@@ -227,17 +261,30 @@ func (db *DB) ListQuestions(ctx context.Context, listID string) ([]store.Questio
 
 	var questions []store.QuestionRecord
 	for rows.Next() {
-		var q store.QuestionRecord
-		var optionsJSON []byte
-		if err := rows.Scan(&q.ID, &q.QuestionListID, &q.Text, &optionsJSON, &q.CorrectOptionID, &q.OrderIndex); err != nil {
+		q, err := scanQuestion(rows)
+		if err != nil {
 			return nil, fmt.Errorf("postgres: scan question: %w", err)
 		}
-		if err := json.Unmarshal(optionsJSON, &q.Options); err != nil {
-			return nil, fmt.Errorf("postgres: unmarshal options: %w", err)
-		}
-		questions = append(questions, q)
+		questions = append(questions, *q)
 	}
 	return questions, rows.Err()
+}
+
+func scanQuestion(row pgx.Row) (*store.QuestionRecord, error) {
+	var q store.QuestionRecord
+	var optionsJSON []byte
+	var themeName, themeListID string
+	if err := row.Scan(&q.ID, &q.QuestionListID, &q.Text, &optionsJSON, &q.CorrectOptionID, &q.OrderIndex,
+		&q.ThemeID, &themeName, &themeListID); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(optionsJSON, &q.Options); err != nil {
+		return nil, fmt.Errorf("unmarshal options: %w", err)
+	}
+	if q.ThemeID != "" {
+		q.Theme = &store.ThemeRef{ID: q.ThemeID, Name: themeName, Scope: themeScope(themeListID)}
+	}
+	return &q, nil
 }
 
 // nullableText returns nil for an empty string (maps to SQL NULL).
