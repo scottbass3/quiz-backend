@@ -16,16 +16,22 @@ type Config struct {
 	ShutdownTimeout  time.Duration
 	GameInitialLives int
 
+	// GameFinishedTTL is how long a finished game stays in memory (so clients
+	// can still read its final state). GameIdleTTL evicts unfinished games
+	// that saw no activity for that long.
+	GameFinishedTTL time.Duration
+	GameIdleTTL     time.Duration
+
 	// OIDC authentication. Set OIDC_ENABLED=true to activate.
 	// When disabled, identity is simulated via X-Debug-Actor-* headers (dev only).
 	OIDCEnabled      bool
 	OIDCIssuerURL    string
 	OIDCClientID     string
 	OIDCClientSecret string
-	OIDCRedirectURL  string  // where the OIDC provider posts the code back
-	OIDCRoleClaim    string  // claim containing the user's role (default: "role")
-	OIDCAdminRole    string  // role value that maps to ActorTypeAdmin (default: "admin")
-	OIDCFrontendURL  string  // redirect destination after successful login
+	OIDCRedirectURL  string // where the OIDC provider posts the code back
+	OIDCRoleClaim    string // claim containing the user's role (default: "role")
+	OIDCAdminRole    string // role value that maps to ActorTypeAdmin (default: "admin")
+	OIDCFrontendURL  string // redirect destination after successful login
 
 	// SessionSecret is the HMAC key used to sign session JWTs and OAuth2 state cookies.
 	// Must be set to a random secret in production.
@@ -41,6 +47,8 @@ func Load() *Config {
 		LogLevel:         parseLogLevel(getenv("LOG_LEVEL", "info")),
 		ShutdownTimeout:  parseDuration(getenv("SHUTDOWN_TIMEOUT", "10s"), 10*time.Second),
 		GameInitialLives: parseInt(getenv("GAME_INITIAL_LIVES", "3"), 3),
+		GameFinishedTTL:  parseDuration(getenv("GAME_FINISHED_TTL", "10m"), 10*time.Minute),
+		GameIdleTTL:      parseDuration(getenv("GAME_IDLE_TTL", "2h"), 2*time.Hour),
 
 		OIDCEnabled:      parseBool(getenv("OIDC_ENABLED", "false")),
 		OIDCIssuerURL:    getenv("OIDC_ISSUER_URL", ""),

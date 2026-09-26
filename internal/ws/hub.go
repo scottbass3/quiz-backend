@@ -67,6 +67,16 @@ func (h *Hub) BroadcastTo(playerID string, event domain.Event) {
 	}
 }
 
+// CloseAll closes every client connection. Clients unregister themselves
+// when their pumps return.
+func (h *Hub) CloseAll() {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, c := range h.clients {
+		c.Close()
+	}
+}
+
 // ConnectedCount returns the number of active WebSocket connections.
 func (h *Hub) ConnectedCount() int {
 	h.mu.RLock()

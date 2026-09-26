@@ -3,6 +3,7 @@ package game
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/scottbass3/quizz-backend/internal/domain"
 )
@@ -50,6 +51,22 @@ func (m *Manager) Delete(gameID string) {
 	m.mu.Lock()
 	delete(m.games, gameID)
 	m.mu.Unlock()
+}
+
+// Sweep removes every game that Engine.Expired reports as evictable and
+// returns their IDs so the caller can release the associated resources.
+func (m *Manager) Sweep(now time.Time, finishedTTL, idleTTL time.Duration) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var removed []string
+	for id, eng := range m.games {
+		if eng.Expired(now, finishedTTL, idleTTL) {
+			delete(m.games, id)
+			removed = append(removed, id)
+		}
+	}
+	return removed
 }
 
 func (m *Manager) Count() int {

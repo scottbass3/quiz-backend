@@ -51,6 +51,8 @@ services:
       REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
       GAME_INITIAL_LIVES: "${GAME_INITIAL_LIVES:-3}"
+      GAME_FINISHED_TTL: "${GAME_FINISHED_TTL:-10m}"
+      GAME_IDLE_TTL: "${GAME_IDLE_TTL:-2h}"
       SHUTDOWN_TIMEOUT: "${SHUTDOWN_TIMEOUT:-10s}"
       SESSION_SECRET: "${SESSION_SECRET:-dev-secret-change-in-production}"
       OIDC_ENABLED: "${OIDC_ENABLED:-false}"

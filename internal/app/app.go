@@ -73,6 +73,22 @@ func (s *gameSessionStore) GetHub(gameID string) (*appws.Hub, bool) {
 	return nil, false
 }
 
+// Remove releases a game's session: stops its Redis subscription and closes
+// its WebSocket connections. No-op if the game has no session.
+func (s *gameSessionStore) Remove(gameID string) {
+	s.mu.Lock()
+	sess, ok := s.sessions[gameID]
+	delete(s.sessions, gameID)
+	s.mu.Unlock()
+
+	if !ok {
+		return
+	}
+	sess.broadcaster.Stop()
+	sess.hub.CloseAll()
+	s.logger.Debug("game session removed", "game_id", gameID)
+}
+
 // Stop cancels all active Redis subscriptions. Called at shutdown.
 func (s *gameSessionStore) Stop() {
 	s.mu.Lock()
@@ -91,6 +107,7 @@ type App struct {
 	pg       *postgres.DB
 	redis    *appredis.Client
 	sessions *gameSessionStore
+	manager  *game.Manager
 }
 
 func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
@@ -123,6 +140,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	// Game layer
 	engineCfg := game.EngineConfig{InitialLives: cfg.GameInitialLives}
 	manager := game.NewManager(engineCfg)
+	a.manager = manager
 
 	// Stores
 	var gs store.GameStore = pg
@@ -218,6 +236,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 
+	go a.sweepGames(ctx)
+
 	go func() {
 		a.logger.Info("server starting", "addr", a.cfg.HTTPAddr)
 		if err := a.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -247,6 +267,31 @@ func (a *App) Run(ctx context.Context) error {
 
 	a.logger.Info("shutdown complete")
 	return nil
+}
+
+// sweepInterval is how often expired games are evicted from memory.
+const sweepInterval = time.Minute
+
+// sweepGames periodically evicts finished and idle games from memory and
+// releases their Redis subscription and WebSocket connections.
+func (a *App) sweepGames(ctx context.Context) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			removed := a.manager.Sweep(now, a.cfg.GameFinishedTTL, a.cfg.GameIdleTTL)
+			for _, id := range removed {
+				a.sessions.Remove(id)
+			}
+			if len(removed) > 0 {
+				a.logger.Info("evicted games", "count", len(removed), "remaining", a.manager.Count())
+			}
+		}
+	}
 }
 
 func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {

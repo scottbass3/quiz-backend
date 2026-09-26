@@ -50,6 +50,11 @@ func NewClient(conn *websocket.Conn, playerID, gameID string, logger *slog.Logge
 	}
 }
 
+// Close closes the underlying connection, which makes both pumps return.
+func (c *Client) Close() error {
+	return c.conn.Close()
+}
+
 // send queues a message; drops it if the buffer is full.
 func (c *Client) send(msg []byte) {
 	select {

@@ -54,6 +54,10 @@ type Engine struct {
 	game *domain.Game
 	cfg  EngineConfig
 	hub  Broadcaster
+
+	// lastActivity is the time of the last state change (join, question
+	// started/closed, answer). Used by Manager.Sweep to evict stale games.
+	lastActivity time.Time
 }
 
 // NewEngine creates a new game engine.
@@ -79,8 +83,9 @@ func NewEngine(gameID, ownerID, questionListID string, questions []*domain.Quest
 			CurrentQIdx:    -1,
 			CreatedAt:      time.Now(),
 		},
-		cfg: cfg,
-		hub: hub,
+		cfg:          cfg,
+		hub:          hub,
+		lastActivity: time.Now(),
 	}
 }
 
@@ -105,6 +110,7 @@ func (e *Engine) AddPlayer(id, name, actorID string) error {
 		GameID:  e.game.ID,
 		ActorID: actorID,
 	}
+	e.lastActivity = time.Now()
 	return nil
 }
 
@@ -166,6 +172,7 @@ func (e *Engine) StartNextQuestion() error {
 	e.game.CurrentQIdx = nextIdx
 	q := e.game.Questions[nextIdx]
 	total := len(e.game.Questions)
+	e.lastActivity = time.Now()
 	e.mu.Unlock()
 
 	event = domain.Event{
@@ -222,6 +229,7 @@ func (e *Engine) SubmitAnswer(playerID, questionID, optionID string) error {
 		Correct:     q.CorrectOptionID == optionID,
 		SubmittedAt: time.Now(),
 	}
+	e.lastActivity = time.Now()
 	e.mu.Unlock()
 
 	// Broadcast answer_submitted without revealing correctness.
@@ -300,6 +308,7 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 	winner := result.Winner
 	gameOver := result.GameOver
 
+	e.lastActivity = time.Now()
 	e.mu.Unlock()
 
 	// Broadcast events after releasing the lock.
@@ -363,6 +372,19 @@ func (e *Engine) Snapshot() domain.Game {
 		g.Questions[i] = &cq
 	}
 	return g
+}
+
+// Expired reports whether the game can be evicted at now: finished games are
+// kept for finishedTTL after their last question (so clients can still read
+// the final state), unfinished games are evicted after idleTTL without activity.
+func (e *Engine) Expired(now time.Time, finishedTTL, idleTTL time.Duration) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	idle := now.Sub(e.lastActivity)
+	if e.game.Status == domain.GameStatusFinished {
+		return idle >= finishedTTL
+	}
+	return idle >= idleTTL
 }
 
 // leaderLocked returns the player with strictly the most lives among ids,
