@@ -146,6 +146,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	var gs store.GameStore = pg
 	var ps store.PlayerStore = pg
 	var qls store.QuestionListStore = pg
+	var ts store.ThemeStore = pg
 
 	// ── Auth ────────────────────────────────────────────────────────────────────
 
@@ -176,6 +177,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 
 	gameH := handler.NewGameHandler(manager, sessions, gs, ps, qls, defaultEngineCfg, logger)
 	qlH := handler.NewQuestionListHandler(qls, logger)
+	themeH := handler.NewThemeHandler(ts, qls, logger)
 	healthH := handler.NewHealthHandler()
 	authH := handler.NewAuthHandler(oidcProvider, sessionSecret, cfg.OIDCFrontendURL, cfg.OIDCEnabled, logger)
 
@@ -217,6 +219,22 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 			r.Get("/{id}", qlH.Get)
 			r.Get("/{id}/questions", qlH.ListQuestions)
 			r.Post("/{id}/questions", qlH.AddQuestion)
+
+			// Custom themes of a list.
+			r.Get("/{id}/themes", themeH.ListForList)
+			r.Post("/{id}/themes", themeH.CreateForList)
+			r.Get("/{id}/themes/{themeID}", themeH.GetForList)
+			r.Put("/{id}/themes/{themeID}", themeH.UpdateForList)
+			r.Delete("/{id}/themes/{themeID}", themeH.DeleteForList)
+		})
+
+		// Global themes (write: admin only).
+		r.Route("/themes", func(r chi.Router) {
+			r.Get("/", themeH.ListGlobal)
+			r.Post("/", themeH.CreateGlobal)
+			r.Get("/{themeID}", themeH.GetGlobal)
+			r.Put("/{themeID}", themeH.UpdateGlobal)
+			r.Delete("/{themeID}", themeH.DeleteGlobal)
 		})
 
 		r.Get("/ws", gameH.WebSocket)
