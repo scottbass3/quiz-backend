@@ -160,3 +160,4 @@ The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected a
 ## Documentation
 
 - Do not use em dashes in documentation.
+- `docs/frontend-integration.md` is the contract for UI developers (endpoints, payloads, events, error codes, TypeScript types). Update it with any change to the HTTP API or the WebSocket protocol.

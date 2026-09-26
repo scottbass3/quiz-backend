@@ -4,6 +4,8 @@ Real-time multiplayer quiz backend in Go, inspired by Master of the Grid by Elis
 
 Players join a game, answer multiple-choice questions over WebSocket and lose a life for every wrong or missing answer. The last player standing wins.
 
+Building a UI on top of this backend? Read the [frontend integration guide](docs/frontend-integration.md).
+
 ## Contents
 
 - [Game rules](#game-rules)
