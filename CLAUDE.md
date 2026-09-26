@@ -46,6 +46,12 @@ Game rules: a wrong or missing answer costs one life, 0 lives means eliminated. 
 - `all_eliminated`: nobody left, no winner
 - `no_more_questions`: last question played with 2+ survivors; the survivor with the most lives wins, a tie is a draw (empty winner). This draw rule is intended, keep it.
 
+Question lifecycle: `Game.QuestionOpen` is set by `StartNextQuestion` and cleared on close. Start requires no open question (`ErrQuestionOpen`), close and answers require one (`ErrNoActiveQuestion`). This is what prevents a question from being closed twice.
+
+Per-game config: `POST /games` may set `initial_lives` and `answer_timeout_seconds`, passed to `Manager.Create` as the engine's `EngineConfig` (`Engine.Config()`); `GameHandler.cfg` only holds the defaults. With a timeout, `StartNextQuestion` arms a `time.AfterFunc` under the lock that calls `closeQuestion(idx)`; that function checks and closes under one lock and refuses any other question, and every close stops the timer.
+
+Persistence of a close lives in `GameHandler.persistClose`, registered with `Engine.OnQuestionClosed` at game creation, so manual and timeout closes are both persisted. Do not persist close results in the HTTP handler.
+
 Clients must be told explicitly when questions run out: `question_started.is_last`, `question_closed.remaining_questions`, `game_over.reason`, and `StartNextQuestion` returns `ErrNoMoreQuestions` (HTTP 409, `code: no_more_questions`) on a game finished by `no_more_questions`. Handlers map engine errors to stable codes in `writeGameError`.
 
 ### Game access rules

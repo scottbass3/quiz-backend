@@ -24,8 +24,8 @@ Players join a game, answer multiple-choice questions over WebSocket and lose a 
 - A game is created from a **question list**. Its questions are copied into memory when the game is created and played in order.
 - The actor who creates the game is its **host**. The host is also added as the first player (the "owner" player).
 - Other players join while the game is still `waiting`. Joining is closed once the first question starts.
-- Every player starts with `GAME_INITIAL_LIVES` lives (default 3).
-- The host starts a question, players answer over WebSocket (first answer only), then the host closes the question.
+- Every player starts with the same number of lives: `initial_lives` if given at game creation, `GAME_INITIAL_LIVES` otherwise (default 3).
+- The host starts a question, players answer over WebSocket (first answer only), then the question is closed: by the host, or automatically after `answer_timeout_seconds` if the game was created with one. Only one question is open at a time: the host must close it before starting the next.
 - On close, every active player who answered wrong **or did not answer** loses one life. A player at 0 lives is eliminated.
 - The game ends when a question is closed and one of these holds. The reason is sent to clients in `game_over`:
 
@@ -256,15 +256,18 @@ Option IDs are generated when left empty. Questions are appended at the end of t
 
 ```
 POST /games
-{ "owner_name": "Alice", "question_list_id": "..." }
+{ "owner_name": "Alice", "question_list_id": "...", "initial_lives": 3, "answer_timeout_seconds": 20 }
 → 201 { "game_id", "owner_id", "question_list_id", "total_questions" }
   400 missing owner_name or question_list_id
+  400 initial_lives below 1, or negative answer_timeout_seconds
   400 code=empty_question_list: the list has no questions
   403 private list owned by someone else
   404 unknown list
 ```
 
 The current actor becomes the host, and an owner player named `owner_name` is created for them (`owner_id` is that player's ID).
+
+`initial_lives` and `answer_timeout_seconds` are optional. Without `initial_lives` the game uses `GAME_INITIAL_LIVES`. Without `answer_timeout_seconds`, or with `0`, questions stay open until the host closes them; otherwise each question is closed automatically after that many seconds, with the same effects and events as a manual close (including persistence).
 
 ```
 POST /games/{id}/join
@@ -279,16 +282,17 @@ The player is bound to the current actor: only that actor can open a WebSocket a
 ```
 GET /games/{id}
 → 200 { "id", "status", "owner_id", "question_list_id", "players": [{ "id", "name", "lives", "active" }],
-        "current_q_idx", "total_questions", "remaining_questions", "end_reason" }
+        "current_q_idx", "question_open", "total_questions", "remaining_questions", "end_reason" }
   404 unknown game (or evicted)
 ```
 
-`current_q_idx` is `-1` before the first question. `remaining_questions` counts the questions not started yet. `end_reason` is empty until the game is finished, then holds the `game_over` reason.
+`current_q_idx` is the index of the last started question (`-1` before the first). `question_open` is true while that question accepts answers. `remaining_questions` counts the questions not started yet. `end_reason` is empty until the game is finished, then holds the `game_over` reason.
 
 ```
 POST /games/{id}/start        (host only)
 → 200 { "status": "question started" }, broadcasts question_started
   403 not the host
+  409 code=question_open: the current question must be closed first
   409 code=no_more_questions: the last question has already been played
   409 code=game_finished: the game ended by elimination
 ```
@@ -299,7 +303,7 @@ POST /games/{id}/close        (host only)
         "game_over": false, "reason": "", "winner": "", "survivors": null }
   403 not the host
   409 code=game_not_running: game not started yet, or already finished
-  409 code=no_active_question
+  409 code=no_active_question: no question is open (already closed by hand or by the timeout)
 ```
 
 Close broadcasts `question_closed`, then `life_lost` (privately), `player_eliminated` and `game_over` as needed. `reason`, `winner` and `survivors` are only meaningful when `game_over` is true. `remaining_questions` can be above 0 on game over when the game ended by elimination. `life_lost` and `eliminated` are `null` when empty.
@@ -327,7 +331,7 @@ Every event has the shape `{ "type": "...", "payload": { ... } }`.
 | `type`              | Sent to      | Payload                                                           |
 |---------------------|--------------|-------------------------------------------------------------------|
 | `game_joined`       | that player  | `game_id`, `player_id`, `status`, `question_list_id`, `total_questions` |
-| `question_started`  | everyone     | `question_id`, `index`, `total`, `is_last`, `text`, `options`     |
+| `question_started`  | everyone     | `question_id`, `index`, `total`, `is_last`, `text`, `options`, `answer_timeout_seconds` (only when the game has a timeout) |
 | `answer_submitted`  | everyone     | `player_id`, `question_id` (correctness is not revealed)          |
 | `question_closed`   | everyone     | `question_id`, `correct_option_id`, `remaining_questions`         |
 | `life_lost`         | that player  | `player_id`, `lives_left`                                         |
@@ -342,7 +346,7 @@ Every event has the shape `{ "type": "...", "payload": { ... } }`.
 { "type": "submit_answer", "data": { "question_id": "...", "option_id": "b" } }
 ```
 
-Only the first answer of a player to the active question counts. Rejected answers (wrong question, already answered, eliminated player) are logged and ignored, no error is sent back.
+Only the first answer of a player to the open question counts. Rejected answers (no open question, wrong question, already answered, eliminated player) are logged and ignored, no error is sent back.
 
 ## Test UI
 
