@@ -219,3 +219,39 @@ func TestConcurrentSubmitAnswer(t *testing.T) {
 		t.Fatalf("expected 50 answers, got %d", len(q.Answers))
 	}
 }
+
+// Snapshot must be safe to read while the engine keeps mutating state
+// (e.g. GET /games/{id} iterating players during a concurrent join).
+func TestSnapshotIsolatedFromConcurrentMutations(t *testing.T) {
+	hub := newStubHub()
+	eng := newEngine(hub)
+	eng.AddQuestion(sampleQuestion())
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			eng.AddPlayer(string(rune('a'+i)), "player")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			snap := eng.Snapshot()
+			for _, p := range snap.Players {
+				_ = p.Lives
+			}
+			for _, q := range snap.Questions {
+				_ = len(q.Answers)
+			}
+		}
+	}()
+	wg.Wait()
+
+	snap := eng.Snapshot()
+	snap.Players["a"].Lives = 0
+	if eng.Snapshot().Players["a"].Lives != 3 {
+		t.Fatal("mutating a snapshot must not affect engine state")
+	}
+}

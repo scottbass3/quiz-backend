@@ -310,11 +310,29 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 	return result, nil
 }
 
-// Snapshot returns a read-only view of the game state. Callers must not mutate.
+// Snapshot returns a deep copy of the game state, safe to read after the lock
+// is released. Option slices are shared because they are never mutated.
 func (e *Engine) Snapshot() domain.Game {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return *e.game
+
+	g := *e.game
+	g.Players = make(map[string]*domain.Player, len(e.game.Players))
+	for id, p := range e.game.Players {
+		cp := *p
+		g.Players[id] = &cp
+	}
+	g.Questions = make([]*domain.Question, len(e.game.Questions))
+	for i, q := range e.game.Questions {
+		cq := *q
+		cq.Answers = make(map[string]*domain.Answer, len(q.Answers))
+		for pid, a := range q.Answers {
+			ca := *a
+			cq.Answers[pid] = &ca
+		}
+		g.Questions[i] = &cq
+	}
+	return g
 }
 
 func (e *Engine) activePlayers() []string {
