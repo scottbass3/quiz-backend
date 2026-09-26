@@ -3,6 +3,7 @@ package auth_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/scottbass3/quizz-backend/internal/auth"
@@ -57,5 +58,30 @@ func TestDebugActor_Defaults(t *testing.T) {
 	a := actorFor(t, r)
 	if a.Sub != "anonymous" || a.ActorType != domain.ActorTypeUser {
 		t.Fatalf("unexpected actor %+v", a)
+	}
+}
+
+func TestOIDCMode_Unauthenticated(t *testing.T) {
+	h := auth.Middleware([]byte("secret"), true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not run without a session")
+	}))
+
+	for name, cookie := range map[string]*http.Cookie{
+		"no cookie":      nil,
+		"invalid cookie": {Name: auth.SessionCookie, Value: "garbage"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/games/x", nil)
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+
+		if rec.Code != http.StatusUnauthorized || rec.Header().Get("Content-Type") != "application/json" {
+			t.Errorf("%s: expected JSON 401, got %d %q", name, rec.Code, rec.Header().Get("Content-Type"))
+		}
+		if !strings.Contains(rec.Body.String(), `"error"`) {
+			t.Errorf("%s: expected an error body, got %q", name, rec.Body.String())
+		}
 	}
 }

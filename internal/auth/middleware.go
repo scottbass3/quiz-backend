@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/scottbass3/quizz-backend/internal/domain"
@@ -20,14 +21,12 @@ func Middleware(secret []byte, oidcEnabled bool) func(http.Handler) http.Handler
 			} else {
 				cookie, err := r.Cookie(SessionCookie)
 				if err != nil {
-					w.Header().Set("Content-Type", "application/json")
-					http.Error(w, `{"error":"unauthenticated"}`, http.StatusUnauthorized)
+					unauthorized(w, "unauthenticated")
 					return
 				}
 				a, err := ParseSessionToken(secret, cookie.Value)
 				if err != nil {
-					w.Header().Set("Content-Type", "application/json")
-					http.Error(w, `{"error":"invalid session"}`, http.StatusUnauthorized)
+					unauthorized(w, "invalid session")
 					return
 				}
 				actor = a
@@ -62,4 +61,12 @@ func actorFromDebugHeaders(r *http.Request) *Actor {
 		Email:     "",
 		ActorType: domain.ActorType(t),
 	}
+}
+
+// unauthorized writes a JSON 401. (http.Error would reset the Content-Type
+// to text/plain.)
+func unauthorized(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
