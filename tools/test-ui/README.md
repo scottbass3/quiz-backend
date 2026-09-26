@@ -1,27 +1,23 @@
-# quizz test ui
+# quizz test UI
 
-Outil de test interne pour le backend `quizz-backend`.  
-**Pas une UI de production.** Sert uniquement à simuler des joueurs et vérifier les flux HTTP + WebSocket manuellement.
+Outil de test interne pour le backend `quizz-backend`.
+**Pas une UI de production.** Il sert à piloter l'API à la main : choisir une identité de test, gérer les listes de questions, créer une partie, simuler des joueurs et inspecter chaque requête HTTP et chaque événement WebSocket.
 
-## Démarrage rapide
+## Démarrage
 
 ### Avec Docker Compose (recommandé)
 
 ```bash
 # Depuis la racine du projet
-make up          # démarre api + postgres + redis + ui
-make migrate-up  # applique les migrations SQL
+make up        # démarre api, postgres, redis et l'UI
+make ui-logs   # logs Vite
 ```
 
-L'UI est disponible sur **http://localhost:5173**
+L'UI est disponible sur **http://localhost:5173** (port configurable via `UI_PORT`). Les migrations sont appliquées automatiquement au démarrage de l'API.
 
-```bash
-make ui-logs     # voir les logs Vite
-```
+### Sans Docker
 
-### Sans Docker (Vite local)
-
-Prérequis : Node 18+ et le backend qui tourne sur `localhost:8080`.
+Prérequis : Node 18+ et le backend accessible (par défaut sur `localhost:8080`).
 
 ```bash
 cd tools/test-ui
@@ -32,30 +28,41 @@ npm run dev
 
 ## Configuration
 
-| Variable          | Description                              | Défaut                    |
-|-------------------|------------------------------------------|---------------------------|
-| `VITE_API_TARGET` | URL du backend côté serveur Vite (proxy) | `http://localhost:8080`   |
-| `UI_PORT`         | Port exposé par Docker Compose           | `5173`                    |
+| Variable          | Description                                   | Défaut                  |
+|-------------------|-----------------------------------------------|-------------------------|
+| `VITE_API_TARGET` | URL du backend utilisée par le proxy Vite     | `http://localhost:8080` |
+| `UI_PORT`         | Port exposé par Docker Compose                | `5173`                  |
 
-> `VITE_API_TARGET` est utilisée **côté serveur Vite** pour le proxy, pas dans le bundle.  
-> Le navigateur communique uniquement avec le serveur Vite via `/api/*` et `/ws`.
+`VITE_API_TARGET` est lue **côté serveur Vite**, elle n'est pas injectée dans le bundle. Le navigateur ne parle qu'au serveur Vite, qui relaie `/api/*` (préfixe retiré) et `/ws` vers le backend. Il n'y a donc pas de problème de CORS, et le cookie de session OIDC est partagé entre l'UI et l'API.
+
+## Identité (acteur)
+
+La barre en haut de la colonne de gauche s'adapte au mode d'authentification du backend (lu via `GET /auth/me`) :
+
+- **Mode dev** (`OIDC_ENABLED=false`) : on choisit le type (`admin` ou `user`) et l'ID de l'acteur. Ils sont envoyés dans les en-têtes `X-Debug-Actor-*` de chaque requête HTTP. Pour le WebSocket, le navigateur ne pouvant pas envoyer d'en-têtes, chaque carte joueur passe l'acteur avec lequel elle a rejoint la partie en paramètres `debugActorType` et `debugActorId`.
+- **Mode OIDC** (`OIDC_ENABLED=true`) : lien de connexion vers `/api/auth/login`, puis affichage de l'utilisateur connecté et bouton de déconnexion.
+
+Règles côté backend à garder en tête :
+
+- Seul l'acteur qui a **créé la partie** (l'hôte) peut démarrer et clôturer les questions.
+- Une carte joueur ne peut se connecter en WebSocket qu'avec l'acteur qui a fait le **join**.
+
+Il faut donc garder le même acteur entre la création de la partie, les joins et le jeu.
 
 ## Flux de test typique
 
-```
-1. Cliquer "GET /health"           → vérifier que le backend répond
-2. Saisir un nom d'hôte et cliquer "create"  → récupérer le game_id
-3. (optionnel) cliquer "GET" pour voir l'état initial
-4. Ajouter 2-3 questions via le formulaire
-5. Pour chaque carte joueur :
-   - Cliquer "join" (le game_id est automatiquement partagé)
-   - Cliquer "connect ws"
-6. Cliquer "▶ start question" → tous les joueurs reçoivent question_started
-7. Chaque carte joueur voit la question et des boutons A/B/C/D
-8. Soumettre des réponses → voir answer_submitted dans les logs d'événements
-9. Cliquer "■ close question" → voir life_lost, player_eliminated, game_over
-10. Les logs HTTP en bas de page montrent chaque requête avec body/response
-```
+1. `GET /health` pour vérifier que le backend répond.
+2. Onglet **Lists** : en `admin`, créer une liste publique et y ajouter quelques questions (ou, en `user`, une liste privée).
+3. Passer en `user` si besoin, sélectionner la liste puis, dans l'onglet **Game**, créer la partie. Le `game_id` est partagé automatiquement avec les cartes joueurs.
+4. Ajouter des cartes joueurs (6 au maximum), puis pour chacune : **join**, puis **connect ws**.
+5. **▶ start question** : chaque carte reçoit `question_started` et affiche les options.
+6. Répondre depuis les cartes : `answer_submitted` apparaît dans les journaux d'événements.
+7. **■ close question** : `question_closed`, puis `life_lost`, `player_eliminated` et `game_over` selon le cas. Le résumé (vies perdues, éliminés, vainqueur, survivants) s'affiche sous les boutons.
+8. Recommencer jusqu'à `game_over`, qui arrive quand il reste au plus un joueur actif ou après la dernière question.
+
+À noter : le créateur de la partie est aussi un joueur (le joueur « owner ») mais n'a pas de carte. Il ne répond jamais et perd donc une vie à chaque question.
+
+Le panneau du bas liste chaque requête HTTP avec son corps et sa réponse. Cliquer sur un événement d'une carte joueur affiche son payload complet.
 
 ## Structure
 
@@ -64,18 +71,21 @@ tools/test-ui/
 ├── index.html
 ├── package.json
 ├── tsconfig.json
-├── vite.config.ts        — proxy /api/* et /ws vers le backend
+├── vite.config.ts             proxy /api/* et /ws vers le backend
 ├── .env.example
 └── src/
     ├── main.ts
-    ├── App.vue            — layout principal, état gameId + slots joueurs
-    ├── style.css          — thème terminal sombre minimal
-    ├── types.ts           — interfaces partagées
-    ├── api.ts             — couche HTTP (fetch + logging automatique)
-    ├── debug.ts           — store réactif pour les logs HTTP
+    ├── App.vue                layout, onglets Lists / Game, cartes joueurs
+    ├── style.css              thème sombre minimal
+    ├── types.ts               types partagés
+    ├── api.ts                 couche HTTP (fetch, en-têtes d'acteur, journalisation)
+    ├── actor.ts               acteur de debug et session OIDC (/auth/me)
+    ├── debug.ts               store réactif des journaux HTTP
     └── components/
-        ├── HealthPanel.vue   — GET /health
-        ├── GamePanel.vue     — créer partie, charger état, add question, start/close
-        ├── PlayerCard.vue    — join, WS, question active, log d'événements
-        └── DebugPanel.vue    — log HTTP, config runtime
+        ├── ActorBar.vue            choix de l'acteur (dev) ou session OIDC
+        ├── HealthPanel.vue         GET /health
+        ├── QuestionListsPanel.vue  listes publiques et privées, ajout de questions
+        ├── GamePanel.vue           créer une partie, état, start / close
+        ├── PlayerCard.vue          join, WebSocket, question active, journal d'événements
+        └── DebugPanel.vue          journal HTTP, configuration
 ```
