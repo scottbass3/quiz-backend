@@ -410,7 +410,7 @@ Only the first answer of a player to the open question counts. Rejected answers 
 
 ## Test UI
 
-`tools/test-ui` is a Vite + Vue 3 tool to drive the API by hand: pick a debug actor, manage question lists, create a game, simulate up to 6 players and inspect every HTTP call and WebSocket event. It is started by `make up`. See [tools/test-ui/README.md](tools/test-ui/README.md).
+`tools/test-ui` is a Vite + Vue 3 tool to drive the API by hand: pick a debug actor, manage question lists, questions and themes, create a game, simulate up to 6 players and inspect every HTTP call and WebSocket event. It is started by `make up`. See [tools/test-ui/README.md](tools/test-ui/README.md).
 
 ## Test scenarios
 
@@ -421,7 +421,7 @@ These scenarios use the test UI in dev mode.
 1. In the actor bar, set the actor to **admin** with any ID (for example `admin-1`).
 2. In the **Lists** tab, create a **public** list and add at least 3 questions.
 3. Switch the actor to **user** (for example `user-1`).
-4. Select the public list, then create a game in the **Game** tab. `user-1` is now the host.
+4. Select the public list, click **use in game →**, then create a game in the **Game** tab. `user-1` is now the host.
 5. Add 2 to 4 player cards, **join** each of them, then **connect ws**.
 6. Click **▶ start question**: every card shows the question.
 7. Answer from some of the cards.
@@ -436,7 +436,7 @@ Keep the same actor from step 4 to the end: start and close are host only, and e
 2. Create a **private** list and add questions to it.
 3. Check that it appears under the private lists.
 4. Switch the actor ID to `user-bob`: the list is no longer visible.
-5. Switch back to `user-alice`, select the list, create a game and play as in scenario 1.
+5. Switch back to `user-alice`, select the list, click **use in game →**, create a game and play as in scenario 1.
 
 ### Scenario 3: access checks (all return 403)
 
@@ -486,4 +486,4 @@ make migrate-up   # restart the API, which re-applies migrations
 - **Single instance per game.** Events go through Redis pub/sub, but a game's state lives in the memory of the instance that created it. Running several API instances requires routing every request of a game (HTTP and WebSocket) to the same instance.
 - **Development defaults.** The session cookie is not marked `Secure`, the WebSocket upgrader accepts any origin and `SESSION_SECRET` has a public default. All three must be changed before a public deployment.
 - **Answers are readable.** `GET /question-lists/{id}/questions` returns `correct_option_id`, so any actor who can read a public list can see its answers.
-- **Catalog editing.** Questions can be created and updated but not reordered or deleted; question lists can only be created. The test UI does not manage themes yet.
+- **Catalog editing.** Questions can be created and updated but not reordered or deleted; question lists can only be created.

@@ -53,7 +53,7 @@ Il faut donc garder le même acteur entre la création de la partie, les joins e
 
 1. `GET /health` pour vérifier que le backend répond.
 2. Onglet **Lists** : en `admin`, créer une liste publique et y ajouter quelques questions (ou, en `user`, une liste privée).
-3. Passer en `user` si besoin, sélectionner la liste puis, dans l'onglet **Game**, créer la partie. On peut y régler le nombre de vies et un temps limite de réponse en secondes (`0` : pas de limite, l'hôte clôt à la main). Le `game_id` est partagé automatiquement avec les cartes joueurs.
+3. Passer en `user` si besoin, sélectionner la liste, cliquer sur **use in game →**, puis créer la partie dans l'onglet **Game**. On peut y régler le nombre de vies et un temps limite de réponse en secondes (`0` : pas de limite, l'hôte clôt à la main). Le `game_id` est partagé automatiquement avec les cartes joueurs.
 4. Ajouter des cartes joueurs (6 au maximum), puis pour chacune : **join**, puis **connect ws**.
 5. **▶ start question** : chaque carte reçoit `question_started` et affiche les options. La dernière question de la liste est signalée par « last question ».
 6. Répondre depuis les cartes : `answer_submitted` apparaît dans les journaux d'événements.
@@ -63,6 +63,14 @@ Il faut donc garder le même acteur entre la création de la partie, les joins e
 À noter : le créateur de la partie est aussi un joueur (le joueur « owner ») mais n'a pas de carte. Il ne répond jamais et perd donc une vie à chaque question.
 
 Le panneau du bas liste chaque requête HTTP avec son corps et sa réponse. Cliquer sur un événement d'une carte joueur affiche son payload complet.
+
+## Thèmes
+
+- Onglet **Themes** : thèmes globaux (création, renommage, suppression). Seuls les `admin` peuvent les modifier.
+- Onglet **Lists**, sous la liste sélectionnée : thèmes propres à cette liste, modifiables par ceux qui peuvent éditer la liste (un `admin` pour une liste publique, le propriétaire pour une liste privée).
+- Le formulaire de question propose un thème (aucun, global ou de la liste). Le bouton **edit** d'une question recharge le formulaire pour la modifier, y compris son thème.
+- La liste des questions peut être filtrée par thème (« no theme » pour les questions sans thème). Les thèmes s'affichent en bleu (global) ou en orange (liste), sur les questions et sur la question en cours des cartes joueurs.
+- Supprimer un thème laisse ses questions sans thème. Après une modification dans l'onglet **Themes**, cliquer sur **refresh** au-dessus des questions pour mettre leur affichage à jour.
 
 ## Structure
 
@@ -75,16 +83,18 @@ tools/test-ui/
 ├── .env.example
 └── src/
     ├── main.ts
-    ├── App.vue                layout, onglets Lists / Game, cartes joueurs
+    ├── App.vue                layout, onglets Lists / Themes / Game, cartes joueurs
     ├── style.css              thème sombre minimal
     ├── types.ts               types partagés
     ├── api.ts                 couche HTTP (fetch, en-têtes d'acteur, journalisation)
     ├── actor.ts               acteur de debug et session OIDC (/auth/me)
     ├── debug.ts               store réactif des journaux HTTP
+    ├── themes.ts              thèmes globaux partagés entre l'onglet Themes et le formulaire de question
     └── components/
         ├── ActorBar.vue            choix de l'acteur (dev) ou session OIDC
         ├── HealthPanel.vue         GET /health
-        ├── QuestionListsPanel.vue  listes publiques et privées, ajout de questions
+        ├── QuestionListsPanel.vue  listes, questions (ajout, édition, thème, filtre)
+        ├── ThemesPanel.vue         gestion d'une portée de thèmes (globale ou d'une liste)
         ├── GamePanel.vue           créer une partie, état, start / close
         ├── PlayerCard.vue          join, WebSocket, question active, journal d'événements
         └── DebugPanel.vue          journal HTTP, configuration

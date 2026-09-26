@@ -147,6 +147,8 @@ Vite + Vue 3 + TypeScript dev tool, not production code. All HTTP calls go throu
 
 The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected as `X-Debug-Actor-*` headers in dev mode). `PlayerCard.vue` remembers the actor used at join time and passes it as `debugActorType` / `debugActorId` on the WS URL. `fetchSession()` calls `GET /auth/me` on mount and populates `sessionUser`. `ActorBar.vue` shows OIDC user info + logout when `oidc_enabled: true`, or the debug controls when `oidc_enabled: false`.
 
+`ThemesPanel.vue` manages one theme scope (global without `listId`, a list's custom themes with it) and is used in the Themes tab and under the selected list. Global themes live in the shared `src/themes.ts` store so the question form sees changes made in the Themes tab. `api.ts` does not parse the body of `204` responses.
+
 ## Key design constraints
 
 - `game.Engine` has no knowledge of transport (HTTP/WS) or storage: it takes a `Broadcaster` interface.
