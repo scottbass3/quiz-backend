@@ -1,237 +1,414 @@
 # quizz-backend
 
-Real-time multiplayer quiz backend in Go. Inspired by Master of the Grid by Elisee.
+Real-time multiplayer quiz backend in Go, inspired by Master of the Grid by Elisee.
 
-## Architecture overview
+Players join a game, answer multiple-choice questions over WebSocket and lose a life for every wrong or missing answer. The last player standing wins.
+
+## Contents
+
+- [Game rules](#game-rules)
+- [Architecture](#architecture)
+- [Getting started](#getting-started)
+- [Configuration](#configuration)
+- [Authentication](#authentication)
+- [HTTP API](#http-api)
+- [WebSocket](#websocket)
+- [Test UI](#test-ui)
+- [Test scenarios](#test-scenarios)
+- [Tests and load tests](#tests-and-load-tests)
+- [Useful commands](#useful-commands)
+- [Known limitations](#known-limitations)
+
+## Game rules
+
+- A game is created from a **question list**. Its questions are copied into memory when the game is created and played in order.
+- The actor who creates the game is its **host**. The host is also added as the first player (the "owner" player).
+- Other players join while the game is still `waiting`. Joining is closed once the first question starts.
+- Every player starts with `GAME_INITIAL_LIVES` lives (default 3).
+- The host starts a question, players answer over WebSocket (first answer only), then the host closes the question.
+- On close, every active player who answered wrong **or did not answer** loses one life. A player at 0 lives is eliminated.
+- The game ends when:
+  - at most one active player is left: that player wins (no winner if nobody survived), or
+  - the last question has been closed: the survivor with the most lives wins, a tie is a draw (no winner).
+
+Game status goes `waiting` → `running` (first question started) → `finished`.
+
+## Architecture
 
 ```
-cmd/api          — entry point: loads config, wires app, handles OS signals
+cmd/api          entry point: loads config, wires the app, handles OS signals
 internal/
-  config/        — env-driven configuration
-  domain/        — pure data types: Game, Player, Question, QuestionList, Answer, Event
-  game/          — game engine (thread-safe, in-memory) + manager
-  store/         — repository interfaces (GameStore, PlayerStore, QuestionListStore)
-  postgres/      — pgx/v5 implementations of store interfaces
-  redis/         — redis client wrapper (ready for pub/sub expansion)
-  ws/            — Hub (broadcast) + Client (read/write pump per connection)
-  handler/       — chi HTTP handlers + WebSocket upgrade
-  app/           — wires all layers, runs the HTTP server
-migrations/      — SQL embedded in the binary, applied automatically at startup
-tools/test-ui/   — Vite + Vue 3 dev tool for manual testing
+  config/        env-driven configuration
+  domain/        pure data types: Game, Player, Question, QuestionList, Answer, Event
+  game/          game engine (thread-safe, in-memory) and the manager that holds all engines
+  store/         repository interfaces (GameStore, PlayerStore, QuestionListStore)
+  postgres/      pgx/v5 implementation of the store interfaces
+  redis/         Redis client and the pub/sub event broadcaster
+  ws/            per-game Hub (fan-out) and Client (read/write pumps per connection)
+  auth/          auth middleware, OIDC provider, session and state JWTs
+  handler/       chi HTTP handlers and the WebSocket upgrade
+  app/           wires all layers, runs the HTTP server and the game sweeper
+migrations/      SQL embedded in the binary, applied automatically at startup
+k6/              load test scripts
+tools/test-ui/   Vite + Vue 3 dev tool for manual testing (not production code)
 ```
 
-**Key design decisions:**
-- Question lists (catalog) are decoupled from game sessions (runtime)
-- Games reference a question list; questions are loaded once at game creation and held in memory
-- `chi` for HTTP routing — idiomatic, zero dependencies beyond stdlib
-- `gorilla/websocket` — mature, explicit read/write pumps with ping/pong
-- Game engine is fully in-memory with a clean `Broadcaster` interface
-- One `Hub` per game — no global broadcast bus, straightforward fan-out
-- Events are broadcast *after* releasing the game lock to avoid contention
-- Migrations are embedded in the binary (`//go:embed`) and run automatically on startup — no external migration tool required
-- Auth is **not implemented** — identity is simulated via dev-only HTTP headers (see below)
+### Request flow
 
-## Prerequisites
+```
+HTTP / WS request
+  → chi router, auth middleware        (internal/app, internal/auth)
+  → handler                            (internal/handler)
+  → game.Engine                        (internal/game)      all runtime game state lives here
+  → redis.PubSubBroadcaster            (internal/redis)     publishes events to game:<id>:events
+  → ws.Hub                             (internal/ws)        forwards events to connected clients
+  → postgres.DB                        (internal/postgres)  best-effort persistence
+```
 
-- Docker & Docker Compose v2
-- Go 1.23+ (for local runs without Docker)
+### Key design decisions
 
-## Quick start
+- **Catalog vs runtime.** Question lists live in Postgres. A game copies the questions of its list once, at creation, and never reads Postgres again for them.
+- **In-memory game state.** Each game is a `game.Engine` guarded by a `sync.RWMutex`. Events are broadcast *after* the lock is released to avoid contention with the hub.
+- **Transport-agnostic engine.** The engine only knows a `Broadcaster` interface. In the app it is backed by Redis pub/sub: the engine publishes to `game:<id>:events`, a subscriber goroutine forwards each event to the local `ws.Hub`, which writes to the WebSocket clients.
+- **One hub per game.** Each game has its own hub and Redis subscription, created with the game and released when the game is evicted.
+- **Best-effort persistence.** Postgres writes (game, players, lives, status) are logged on failure but never abort a request. Answers are not persisted.
+- **Eviction.** A sweeper runs every minute and removes finished games after `GAME_FINISHED_TTL` and unfinished games idle for `GAME_IDLE_TTL`, closing their WebSocket connections and Redis subscription.
+- **Embedded migrations.** SQL files are embedded with `//go:embed` and applied on every startup. Every statement is idempotent (`IF NOT EXISTS`), so no external migration tool is needed.
+- **Libraries.** `chi` for routing, `gorilla/websocket` for WebSocket (explicit pumps with ping/pong), `pgx/v5`, `go-redis/v9`, `coreos/go-oidc` and `golang-jwt`.
+
+## Getting started
+
+### Prerequisites
+
+- Docker and Docker Compose v2
+- Go 1.23+ (to run or test outside Docker; `make test` also needs a C compiler because it enables the race detector)
+- Node 18+ (only to run the test UI outside Docker)
+- [k6](https://k6.io/) (only for load tests)
+
+### With Docker Compose
 
 ```bash
-cp .env.example .env   # adjust if needed
-make up                # builds and starts api + postgres + redis + test-ui
+cp .env.example .env   # optional, every variable has a default
+make up                # builds and starts api, postgres, redis and the test UI
 ```
-
-Migrations run automatically when the API starts.
 
 - API: `http://localhost:8080`
 - Test UI: `http://localhost:5173`
 
-## Environment variables
+The API runs with [air](https://github.com/air-verse/air) and rebuilds on every `.go` change. Migrations run automatically when the API starts.
 
-| Variable             | Default                                            | Description                         |
-|----------------------|----------------------------------------------------|-------------------------------------|
-| `HTTP_PORT`          | `8080`                                             | Host port exposed by Docker         |
-| `HTTP_ADDR`          | `:8080`                                            | Address the server listens on       |
-| `DATABASE_URL`       | `postgres://quizz:quizz@localhost:5432/quizz?...` | PostgreSQL DSN                      |
-| `REDIS_ADDR`         | `localhost:6379`                                   | Redis address                       |
-| `REDIS_PASSWORD`     | *(empty)*                                          | Redis password                      |
-| `LOG_LEVEL`          | `info`                                             | `debug` / `info` / `warn` / `error` |
-| `GAME_INITIAL_LIVES` | `3`                                                | Lives per player                    |
-| `SHUTDOWN_TIMEOUT`   | `10s`                                              | Graceful shutdown window            |
-| `UI_PORT`            | `5173`                                             | Host port for the test UI           |
+### Without Docker (API only)
 
-## Dev-only identity simulation
+The API reads its configuration from the process environment only, it does not load `.env` by itself.
 
-Authentication is not implemented. Instead, all endpoints read two **dev-only headers** to simulate an actor:
+```bash
+docker compose up -d postgres redis
+set -a && . ./.env && set +a
+go run ./cmd/api
+```
 
-| Header                | Values         | Default       |
-|-----------------------|----------------|---------------|
-| `X-Debug-Actor-Type`  | `admin`, `user`| `user`        |
-| `X-Debug-Actor-Id`    | any string     | `anonymous`   |
+## Configuration
 
-**These headers must not be trusted in production.** Replace them with real auth middleware before any public deployment.
+### Read by the API
 
-The test UI injects these headers automatically on every HTTP request. You can change the actor type and ID in the "actor (dev)" bar at the top of the sidebar.
+| Variable             | Default                                             | Description                                                |
+|----------------------|-----------------------------------------------------|------------------------------------------------------------|
+| `HTTP_ADDR`          | `:8080`                                             | Address the server listens on                              |
+| `DATABASE_URL`       | `postgres://quizz:quizz@localhost:5432/quizz?...`   | PostgreSQL DSN                                             |
+| `REDIS_ADDR`         | `localhost:6379`                                    | Redis address                                              |
+| `REDIS_PASSWORD`     | *(empty)*                                           | Redis password                                             |
+| `LOG_LEVEL`          | `info`                                              | `debug`, `info`, `warn` or `error`                         |
+| `GAME_INITIAL_LIVES` | `3`                                                 | Lives per player                                           |
+| `GAME_FINISHED_TTL`  | `10m`                                               | How long a finished game stays in memory                   |
+| `GAME_IDLE_TTL`      | `2h`                                                | Evict unfinished games with no activity for this long      |
+| `SHUTDOWN_TIMEOUT`   | `10s`                                               | Graceful shutdown window                                   |
+| `SESSION_SECRET`     | `dev-secret-change-in-production`                   | HMAC key for session and OAuth2 state JWTs                 |
+| `OIDC_ENABLED`       | `false`                                             | `true` to use OIDC instead of the debug headers            |
+| `OIDC_ISSUER_URL`    | *(empty)*                                           | OIDC issuer (used for discovery)                           |
+| `OIDC_CLIENT_ID`     | *(empty)*                                           | OAuth2 client ID                                           |
+| `OIDC_CLIENT_SECRET` | *(empty)*                                           | OAuth2 client secret                                       |
+| `OIDC_REDIRECT_URL`  | `http://localhost:8080/auth/callback`               | Callback URL registered at the provider (points to the API) |
+| `OIDC_FRONTEND_URL`  | `http://localhost:5173`                             | Where the browser is sent after a successful login         |
+| `OIDC_ROLE_CLAIM`    | `role`                                              | ID token claim holding the role (string or string array)   |
+| `OIDC_ADMIN_ROLE`    | `admin`                                             | Role value that maps to the `admin` actor type             |
+
+Durations use Go syntax (`90s`, `10m`, `2h`). Invalid values fall back to the default.
+
+### Used by Docker Compose only
+
+| Variable            | Default | Description                     |
+|---------------------|---------|---------------------------------|
+| `HTTP_PORT`         | `8080`  | Host port mapped to the API     |
+| `UI_PORT`           | `5173`  | Host port mapped to the test UI |
+| `POSTGRES_USER`     | `quizz` | Postgres user                   |
+| `POSTGRES_PASSWORD` | `quizz` | Postgres password               |
+| `POSTGRES_DB`       | `quizz` | Postgres database               |
+| `POSTGRES_PORT`     | `5432`  | Host port mapped to Postgres    |
+| `REDIS_PORT`        | `6379`  | Host port mapped to Redis       |
+
+Under Compose, `HTTP_ADDR`, `DATABASE_URL` and `REDIS_ADDR` are set by `docker-compose.yml` to reach the other containers. The values in `.env` for these three only apply to local runs.
+
+## Authentication
+
+Every route except `/health`, `/auth/login`, `/auth/callback` and `/auth/logout` goes through the auth middleware, which resolves an **actor**: an ID and a type, `admin` or `user`. There are two modes, selected by `OIDC_ENABLED`.
+
+### Dev mode (`OIDC_ENABLED=false`, default)
+
+The actor is read from two headers:
+
+| Header               | Values          | Default     |
+|----------------------|-----------------|-------------|
+| `X-Debug-Actor-Type` | `admin`, `user` | `user`      |
+| `X-Debug-Actor-Id`   | any string      | `anonymous` |
+
+Browsers cannot set headers on a WebSocket handshake, so the same values are also accepted as the `debugActorType` and `debugActorId` query parameters. Headers take precedence.
+
+**Dev mode trusts the client completely. Never expose it publicly.**
+
+### OIDC mode (`OIDC_ENABLED=true`)
+
+Standard Authorization Code flow:
+
+1. `GET /auth/login` generates a `state` and a `nonce`, stores them in a signed, short-lived `oauth2_state` cookie and redirects to the provider.
+2. `GET /auth/callback` checks the state, exchanges the code, verifies the ID token and its nonce, then sets the `quizz_session` cookie (signed JWT, HttpOnly, 24h) and redirects to `OIDC_FRONTEND_URL`.
+3. The middleware validates `quizz_session` on every protected request. A missing or invalid cookie gives `401`.
+4. `POST /auth/logout` clears the cookie.
+
+The actor ID is the token `sub`. The actor type is `admin` when the `OIDC_ROLE_CLAIM` claim equals (or, for an array, contains) `OIDC_ADMIN_ROLE`, and `user` otherwise.
+
+Register `OIDC_REDIRECT_URL` as an allowed redirect URI at your provider, and set a random `SESSION_SECRET`.
 
 ## HTTP API
+
+All bodies are JSON. Errors are returned as `{ "error": "..." }`.
 
 ### Health
 
 ```
 GET /health
-→ { "status": "ok", "uptime": "1m23s" }
+→ 200 { "status": "ok", "uptime": "1m23s" }
 ```
+
+### Auth
+
+| Route                | Description                                                                 |
+|----------------------|-----------------------------------------------------------------------------|
+| `GET /auth/login`    | Redirects to the OIDC provider (`404` in dev mode)                          |
+| `GET /auth/callback` | OIDC redirect target (`404` in dev mode)                                    |
+| `POST /auth/logout`  | Clears the session cookie                                                   |
+| `GET /auth/me`       | Current actor: `{ sub, name, email, actor_type, oidc_enabled }`, works in both modes |
 
 ### Question lists
 
+| Visibility | Created by            | Readable by | Questions added by |
+|------------|-----------------------|-------------|--------------------|
+| `public`   | `admin` actors only   | everyone    | any `admin` actor  |
+| `private`  | `user` actors only    | its owner   | its owner          |
+
 ```
 POST /question-lists
-Headers: X-Debug-Actor-Type: admin   (public) or user (private)
-         X-Debug-Actor-Id: <id>
 { "name": "General culture", "description": "...", "visibility": "public" }
-→ { "id": "...", "name": "...", "visibility": "public", ... }
-
-Rules:
-  - visibility=public  → actor must be admin
-  - visibility=private → actor must be user (list is owned by the actor id)
+→ 201 { "id", "name", "description", "visibility", "owner_type", "owner_id", "created_at", "updated_at" }
+  400 missing name or invalid visibility
+  403 visibility not allowed for this actor type
 ```
 
 ```
 GET /question-lists/public
-→ [{ "id": "...", "name": "...", ... }]
+→ 200 [ { ...list }, ... ]
 ```
 
 ```
 GET /question-lists/private
-Headers: X-Debug-Actor-Type: user
-         X-Debug-Actor-Id: <id>
-→ lists owned by that actor id
+→ 200 lists owned by the current actor
+  403 actor is not a user
 ```
 
 ```
 GET /question-lists/{id}
-→ list metadata (private lists only accessible by their owner)
-```
-
-```
 GET /question-lists/{id}/questions
-→ ordered list of questions in the catalog
+→ 200 list metadata / ordered questions (including correct_option_id)
+  403 private list owned by someone else
+  404 unknown list
 ```
 
 ```
 POST /question-lists/{id}/questions
-Headers: X-Debug-Actor-Type: admin  (for public lists)
-                              user   (for private lists, must be owner)
 {
   "text": "Capital of France?",
   "options": [{"id":"a","text":"London"},{"id":"b","text":"Paris"},{"id":"c","text":"Berlin"}],
   "correct_option_id": "b"
 }
-→ { "question_id": "..." }
+→ 201 { "question_id": "..." }
+  400 missing text, fewer than 2 options or missing correct_option_id
+  403 not allowed to edit this list
 ```
+
+Option IDs are generated when left empty. Questions are appended at the end of the list.
 
 ### Games
 
 ```
 POST /games
 { "owner_name": "Alice", "question_list_id": "..." }
-→ { "game_id": "...", "owner_id": "...", "question_list_id": "...", "total_questions": 3 }
+→ 201 { "game_id", "owner_id", "question_list_id", "total_questions" }
+  400 missing owner_name or question_list_id
+  403 private list owned by someone else
+  404 unknown list
 ```
 
-The owner is automatically added as a player. Questions are loaded from the list at creation and held in memory for the lifetime of the game.
-
-Private lists can only be used by their owner (matched via `X-Debug-Actor-Id`).
+The current actor becomes the host, and an owner player named `owner_name` is created for them (`owner_id` is that player's ID).
 
 ```
 POST /games/{id}/join
 { "player_name": "Bob" }
-→ { "game_id": "...", "player_id": "..." }
+→ 200 { "game_id", "player_id" }
+  404 unknown game
+  409 game already started
 ```
+
+The player is bound to the current actor: only that actor can open a WebSocket as this player. One actor may own several players.
 
 ```
 GET /games/{id}
-→ { "id": "...", "status": "waiting", "question_list_id": "...", "players": [...], "current_q_idx": -1, "total_questions": 3 }
+→ 200 { "id", "status", "owner_id", "question_list_id", "players": [{ "id", "name", "lives", "active" }], "current_q_idx", "total_questions" }
+  404 unknown game (or evicted)
+```
+
+`current_q_idx` is `-1` before the first question.
+
+```
+POST /games/{id}/start        (host only)
+→ 200 { "status": "question started" }, broadcasts question_started
+  403 not the host
+  409 game finished or no more questions
 ```
 
 ```
-POST /games/{id}/start
-→ broadcasts `question_started` to all connected WS clients
+POST /games/{id}/close        (host only)
+→ 200 { "life_lost": [...], "eliminated": [...], "game_over": false, "winner": "", "survivors": null }
+  403 not the host
+  409 game not running or no active question
 ```
 
+Close broadcasts `question_closed`, then `life_lost` (privately), `player_eliminated` and `game_over` as needed. `survivors` is set only when `game_over` is true. `life_lost` and `eliminated` are `null` when empty.
+
+## WebSocket
+
 ```
-POST /games/{id}/close
-→ broadcasts `question_closed`, `life_lost`, `player_eliminated`, `game_over`
-→ { "life_lost": [...], "eliminated": [...], "game_over": false, "winner": "" }
+ws://localhost:8080/ws?gameId=<game_id>&playerId=<player_id>
 ```
 
-### WebSocket
+The connection is authenticated like any other request (session cookie, or debug headers / query parameters in dev mode), and the actor must be the one that created `playerId`.
 
-Connect at `ws://localhost:8080/ws?gameId=...&playerId=...`
+| Status | Reason                                   |
+|--------|------------------------------------------|
+| `400`  | missing `gameId` or `playerId`           |
+| `403`  | player not in the game, or owned by another actor |
+| `404`  | unknown game                             |
 
-**Server → client events:**
+The server pings every 54s and closes the connection if no pong arrives within 60s. Messages are limited to 4 KB.
 
-| `type`               | Description                                       |
-|----------------------|---------------------------------------------------|
-| `game_joined`        | Sent on successful connection (includes total_questions, question_list_id) |
-| `question_started`   | New question broadcast; includes options          |
-| `answer_submitted`   | A player submitted an answer (correctness hidden) |
-| `question_closed`    | Question ended; correct option revealed           |
-| `life_lost`          | Sent privately to the player who lost a life      |
-| `player_eliminated`  | A player reached 0 lives                          |
-| `game_over`          | Last player standing determined                   |
+### Server → client events
 
-**Client → server messages:**
+Every event has the shape `{ "type": "...", "payload": { ... } }`.
+
+| `type`              | Sent to      | Payload                                                           |
+|---------------------|--------------|-------------------------------------------------------------------|
+| `game_joined`       | that player  | `game_id`, `player_id`, `status`, `question_list_id`, `total_questions` |
+| `question_started`  | everyone     | `question_id`, `index`, `total`, `text`, `options`                |
+| `answer_submitted`  | everyone     | `player_id`, `question_id` (correctness is not revealed)          |
+| `question_closed`   | everyone     | `question_id`, `correct_option_id`                                |
+| `life_lost`         | that player  | `player_id`, `lives_left`                                         |
+| `player_eliminated` | everyone     | `player_id`                                                       |
+| `game_over`         | everyone     | `winner_id` (empty for a draw), `survivors`                       |
+
+`game_joined` is written directly to the local hub, the other events go through Redis.
+
+### Client → server messages
 
 ```json
 { "type": "submit_answer", "data": { "question_id": "...", "option_id": "b" } }
 ```
 
+Only the first answer of a player to the active question counts. Rejected answers (wrong question, already answered, eliminated player) are logged and ignored, no error is sent back.
+
+## Test UI
+
+`tools/test-ui` is a Vite + Vue 3 tool to drive the API by hand: pick a debug actor, manage question lists, create a game, simulate up to 6 players and inspect every HTTP call and WebSocket event. It is started by `make up`. See [tools/test-ui/README.md](tools/test-ui/README.md).
+
 ## Test scenarios
 
-### Scenario 1 — Public quiz (admin flow)
+These scenarios use the test UI in dev mode.
 
-1. In the test UI, set actor to **admin** with any ID (e.g. `admin-1`)
-2. In "Question Lists", create a **public** list (e.g. "General Culture")
-3. Add 3+ questions to the list
-4. Switch actor to **user** (e.g. `user-1`)
-5. In "Game", select the public list from the list panel, then click **create game**
-6. Add 2–4 player cards, join each to the game, connect WS
-7. Click **▶ start question** → all players see the question
-8. Players click their answer
-9. Click **■ close question** → scores update, lives deducted for wrong answers
-10. Repeat for remaining questions
+### Scenario 1: public quiz
 
-### Scenario 2 — Private quiz (user flow)
+1. In the actor bar, set the actor to **admin** with any ID (for example `admin-1`).
+2. In the **Lists** tab, create a **public** list and add at least 3 questions.
+3. Switch the actor to **user** (for example `user-1`).
+4. Select the public list, then create a game in the **Game** tab. `user-1` is now the host.
+5. Add 2 to 4 player cards, **join** each of them, then **connect ws**.
+6. Click **▶ start question**: every card shows the question.
+7. Answer from some of the cards.
+8. Click **■ close question**: players who answered wrong or did not answer lose a life. The owner player has no card, so it loses a life on every question.
+9. Repeat until `game_over`.
 
-1. Set actor to **user** with ID `user-alice`
-2. Create a **private** list (e.g. "Alice's trivia")
-3. Add questions to the list
-4. Verify the list appears in "my private lists"
-5. Switch actor ID to `user-bob` → the list should not appear in Bob's private lists
-6. Switch back to `user-alice`, select the list, create a game
-7. Play as in scenario 1
+Keep the same actor from step 4 to the end: start and close are host only, and each card can only connect with the actor it joined with.
 
-### Scenario 3 — Access denied checks
+### Scenario 2: private quiz
 
-- Try creating a **public** list with actor type `user` → 403
-- Try creating a **private** list with actor type `admin` → 403
-- Try creating a game with a private list belonging to another user → 403
-- Try adding a question to a public list with actor type `user` → 403
+1. Set the actor to **user** with ID `user-alice`.
+2. Create a **private** list and add questions to it.
+3. Check that it appears under the private lists.
+4. Switch the actor ID to `user-bob`: the list is no longer visible.
+5. Switch back to `user-alice`, select the list, create a game and play as in scenario 1.
+
+### Scenario 3: access checks (all return 403)
+
+- Create a **public** list as a `user`.
+- Create a **private** list as an `admin`.
+- Add a question to a public list as a `user`.
+- Create a game from another user's private list.
+- Start or close a question with an actor other than the host.
+- Open a WebSocket for a player with an actor other than the one that joined.
+
+## Tests and load tests
+
+```bash
+make test     # go test ./... -race -count=1
+```
+
+Unit tests cover the game engine, the manager sweeper and the dev auth middleware. Handlers and the Postgres layer have no automated tests yet.
+
+Load tests use k6 against a running stack (`make up`). `BASE_URL` and `WS_URL` default to `localhost:$(HTTP_PORT)`.
+
+```bash
+make load-test-game   # 10 VUs for 2 minutes, each playing a full one-player game
+make load-test-room   # NUM_PLAYERS players (default 50) in a single game
+make load-test        # both
+```
+
+`load-test-room` also accepts `ANSWER_MIN_MS`, `ANSWER_MAX_MS` and `CLOSE_DELAY_MS`, for example `make load-test-room NUM_PLAYERS=200`.
 
 ## Useful commands
 
 ```bash
-make up           # start all services (api + postgres + redis + test-ui)
+make up           # start api, postgres, redis and the test UI
 make down         # stop all services
 make logs         # tail API logs
-make ui-logs      # tail test-ui logs
-make test         # run all tests with race detector
-make fmt          # format code
-make lint         # run golangci-lint (falls back to go vet)
-make shell        # sh into the API container
-make build        # build binary locally
+make ui-logs      # tail test UI logs
+make test         # run all tests with the race detector
+make fmt          # gofmt (and goimports if installed)
+make lint         # golangci-lint, falls back to go vet
+make build        # build the binary into bin/api
+make shell        # open a shell in the API container
+make migrate-up   # restart the API, which re-applies migrations
 ```
 
-Migrations run automatically at startup — restart the API container to apply new migrations.
+## Known limitations
+
+- **Game state does not survive a restart.** Games live in memory only; Postgres keeps a record of games and players but is never read back.
+- **Single instance per game.** Events go through Redis pub/sub, but a game's state lives in the memory of the instance that created it. Running several API instances requires routing every request of a game (HTTP and WebSocket) to the same instance.
+- **Development defaults.** The session cookie is not marked `Secure`, the WebSocket upgrader accepts any origin and `SESSION_SECRET` has a public default. All three must be changed before a public deployment.
+- **Answers are readable.** `GET /question-lists/{id}/questions` returns `correct_option_id`, so any actor who can read a public list can see its answers.
+- **Catalog editing.** Question lists and questions can be created but not edited, reordered or deleted through the API.
