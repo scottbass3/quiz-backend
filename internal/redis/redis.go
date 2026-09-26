@@ -8,7 +8,7 @@ import (
 )
 
 // Client wraps the go-redis client.
-// For now it is a thin layer; pub/sub and distributed locking will be added later.
+// Pub/sub fan-out lives in PubSubBroadcaster (broadcaster.go).
 type Client struct {
 	rdb *redis.Client
 }

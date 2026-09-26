@@ -19,7 +19,7 @@ const (
 )
 
 // ActorType identifies the kind of actor performing operations.
-// Used in the temporary dev auth simulation (X-Debug-Actor-Type header).
+// Set from the OIDC role claim, or from the X-Debug-Actor-Type header in dev mode.
 type ActorType string
 
 const (
@@ -56,7 +56,7 @@ type Game struct {
 	ID             string
 	Status         GameStatus
 	OwnerID        string
-	QuestionListID string     // references the list this game was created from
+	QuestionListID string // references the list this game was created from
 	Players        map[string]*Player
 	Questions      []*Question // runtime copy, loaded from the list at game creation
 	CurrentQIdx    int         // -1 means no active question

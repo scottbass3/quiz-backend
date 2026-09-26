@@ -25,8 +25,8 @@ type EngineConfig struct {
 	InitialLives int
 }
 
-// Broadcaster is implemented by the WebSocket hub.
-// The engine uses it to push events without importing the ws package directly.
+// Broadcaster is implemented by redis.PubSubBroadcaster in production and by
+// ws.Hub directly. The engine uses it to push events without knowing the transport.
 type Broadcaster interface {
 	Broadcast(event domain.Event)
 	BroadcastTo(playerID string, event domain.Event)
