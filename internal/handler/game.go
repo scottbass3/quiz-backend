@@ -101,6 +101,11 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(qrecs) == 0 {
+		writeErrorCode(w, http.StatusBadRequest, "empty_question_list", "question list has no questions")
+		return
+	}
+
 	questions := make([]*domain.Question, len(qrecs))
 	for i, qr := range qrecs {
 		opts := make([]domain.Option, len(qr.Options))
@@ -250,13 +255,15 @@ func (h *GameHandler) GetGame(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":               snap.ID,
-		"status":           snap.Status,
-		"owner_id":         snap.OwnerID,
-		"question_list_id": snap.QuestionListID,
-		"players":          players,
-		"current_q_idx":    snap.CurrentQIdx,
-		"total_questions":  len(snap.Questions),
+		"id":                  snap.ID,
+		"status":              snap.Status,
+		"owner_id":            snap.OwnerID,
+		"question_list_id":    snap.QuestionListID,
+		"players":             players,
+		"current_q_idx":       snap.CurrentQIdx,
+		"total_questions":     len(snap.Questions),
+		"remaining_questions": len(snap.Questions) - snap.CurrentQIdx - 1,
+		"end_reason":          snap.EndReason,
 	})
 }
 
@@ -281,7 +288,7 @@ func (h *GameHandler) StartNextQuestion(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := eng.StartNextQuestion(); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeGameError(w, err)
 		return
 	}
 
@@ -317,7 +324,7 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 
 	result, err := eng.CloseQuestion()
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeGameError(w, err)
 		return
 	}
 
@@ -338,12 +345,31 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"life_lost":  result.LifeLost,
-		"eliminated": result.Eliminated,
-		"game_over":  result.GameOver,
-		"winner":     result.Winner,
-		"survivors":  result.Survivors,
+		"life_lost":           result.LifeLost,
+		"eliminated":          result.Eliminated,
+		"game_over":           result.GameOver,
+		"winner":              result.Winner,
+		"survivors":           result.Survivors,
+		"reason":              result.Reason,
+		"remaining_questions": result.RemainingQuestions,
 	})
+}
+
+// writeGameError maps an engine state error to 409 with a stable code the
+// frontend can switch on (e.g. "no_more_questions" once the list is exhausted).
+func writeGameError(w http.ResponseWriter, err error) {
+	code := "conflict"
+	switch {
+	case errors.Is(err, game.ErrNoMoreQuestions):
+		code = "no_more_questions"
+	case errors.Is(err, game.ErrGameFinished):
+		code = "game_finished"
+	case errors.Is(err, game.ErrGameNotRunning):
+		code = "game_not_running"
+	case errors.Is(err, game.ErrNoActiveQuestion):
+		code = "no_active_question"
+	}
+	writeErrorCode(w, http.StatusConflict, code, err.Error())
 }
 
 // GET /ws?gameId=...&playerId=...

@@ -10,6 +10,19 @@ const (
 	GameStatusFinished GameStatus = "finished"
 )
 
+// GameOverReason explains why a game finished.
+type GameOverReason string
+
+const (
+	// GameOverLastPlayerStanding: a single active player is left, they win.
+	GameOverLastPlayerStanding GameOverReason = "last_player_standing"
+	// GameOverAllEliminated: every remaining player was eliminated on the same question.
+	GameOverAllEliminated GameOverReason = "all_eliminated"
+	// GameOverNoMoreQuestions: the last question was played with several survivors.
+	// The survivor with the most lives wins; a tie is a draw.
+	GameOverNoMoreQuestions GameOverReason = "no_more_questions"
+)
+
 // ListVisibility controls who can see a question list.
 type ListVisibility string
 
@@ -58,8 +71,9 @@ type Game struct {
 	OwnerID        string
 	QuestionListID string // references the list this game was created from
 	Players        map[string]*Player
-	Questions      []*Question // runtime copy, loaded from the list at game creation
-	CurrentQIdx    int         // -1 means no active question
+	Questions      []*Question    // runtime copy, loaded from the list at game creation
+	CurrentQIdx    int            // -1 means no active question
+	EndReason      GameOverReason // empty until the game is finished
 	CreatedAt      time.Time
 }
 

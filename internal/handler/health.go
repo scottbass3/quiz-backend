@@ -31,3 +31,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
+
+// writeErrorCode adds a machine-readable code next to the human-readable message.
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}

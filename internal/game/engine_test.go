@@ -41,6 +41,20 @@ func (s *stubHub) broadcastTypes() []domain.EventType {
 	return types
 }
 
+// lastPayload returns the payload of the last broadcast event of type t.
+func (s *stubHub) lastPayload(t *testing.T, typ domain.EventType) map[string]any {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.events) - 1; i >= 0; i-- {
+		if s.events[i].Type == typ {
+			return s.events[i].Payload.(map[string]any)
+		}
+	}
+	t.Fatalf("no %s event broadcast", typ)
+	return nil
+}
+
 func (s *stubHub) directTypes(playerID string) []domain.EventType {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,6 +208,9 @@ func TestPlayerEliminated(t *testing.T) {
 	if result.Winner != "p1" {
 		t.Fatalf("expected p1 as winner, got %q", result.Winner)
 	}
+	if result.Reason != domain.GameOverLastPlayerStanding {
+		t.Fatalf("expected reason last_player_standing, got %q", result.Reason)
+	}
 }
 
 func TestConcurrentSubmitAnswer(t *testing.T) {
@@ -284,15 +301,23 @@ func TestGameEndsAfterLastQuestion_LeaderWins(t *testing.T) {
 	if len(result.Survivors) != 2 {
 		t.Fatalf("expected 2 survivors, got %v", result.Survivors)
 	}
-	if eng.Snapshot().Status != domain.GameStatusFinished {
-		t.Fatal("game status should be finished")
+	if result.Reason != domain.GameOverNoMoreQuestions || result.RemainingQuestions != 0 {
+		t.Fatalf("expected reason no_more_questions with 0 remaining, got %q / %d", result.Reason, result.RemainingQuestions)
 	}
-	if err := eng.StartNextQuestion(); err != game.ErrGameFinished {
-		t.Fatalf("expected ErrGameFinished, got %v", err)
+	snap := eng.Snapshot()
+	if snap.Status != domain.GameStatusFinished || snap.EndReason != domain.GameOverNoMoreQuestions {
+		t.Fatalf("expected finished game with end reason, got %q / %q", snap.Status, snap.EndReason)
+	}
+	// Once the list is exhausted, starting again says so explicitly.
+	if err := eng.StartNextQuestion(); err != game.ErrNoMoreQuestions {
+		t.Fatalf("expected ErrNoMoreQuestions, got %v", err)
 	}
 	types := hub.broadcastTypes()
 	if types[len(types)-1] != domain.EventGameOver {
 		t.Fatalf("expected game_over as last event, got %v", types)
+	}
+	if got := hub.lastPayload(t, domain.EventGameOver)["reason"]; got != domain.GameOverNoMoreQuestions {
+		t.Fatalf("expected game_over reason no_more_questions, got %v", got)
 	}
 }
 
@@ -340,5 +365,63 @@ func TestActorOwnership(t *testing.T) {
 	}
 	if _, ok := eng.PlayerActorID("unknown"); ok {
 		t.Fatal("unknown player must not be found")
+	}
+}
+
+func TestQuestionEventsAnnounceLastQuestion(t *testing.T) {
+	hub := newStubHub()
+	q2 := sampleQuestion()
+	q2.ID = "q2"
+	eng := game.NewEngine("game-x", "owner-1", "", []*domain.Question{sampleQuestion(), q2}, game.EngineConfig{InitialLives: 3}, hub)
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
+
+	eng.StartNextQuestion()
+	if got := hub.lastPayload(t, domain.EventQuestionStarted)["is_last"]; got != false {
+		t.Fatalf("first of two questions must not be last, got %v", got)
+	}
+	result, _ := eng.CloseQuestion()
+	if result.RemainingQuestions != 1 || result.GameOver {
+		t.Fatalf("expected 1 remaining question and no game over, got %+v", result)
+	}
+	if got := hub.lastPayload(t, domain.EventQuestionClosed)["remaining_questions"]; got != 1 {
+		t.Fatalf("expected remaining_questions=1 in question_closed, got %v", got)
+	}
+
+	eng.StartNextQuestion()
+	if got := hub.lastPayload(t, domain.EventQuestionStarted)["is_last"]; got != true {
+		t.Fatalf("second of two questions must be last, got %v", got)
+	}
+	eng.CloseQuestion()
+	if got := hub.lastPayload(t, domain.EventQuestionClosed)["remaining_questions"]; got != 0 {
+		t.Fatalf("expected remaining_questions=0 in question_closed, got %v", got)
+	}
+}
+
+func TestGameOver_AllEliminated(t *testing.T) {
+	hub := newStubHub()
+	q2 := sampleQuestion()
+	q2.ID = "q2"
+	eng := game.NewEngine("game-x", "owner-1", "", []*domain.Question{sampleQuestion(), q2}, game.EngineConfig{InitialLives: 1}, hub)
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
+	eng.StartNextQuestion()
+
+	// Nobody answers: both lose their only life on the same question.
+	result, err := eng.CloseQuestion()
+	if err != nil {
+		t.Fatalf("close question error: %v", err)
+	}
+	if !result.GameOver || result.Reason != domain.GameOverAllEliminated {
+		t.Fatalf("expected game over by all_eliminated, got %+v", result)
+	}
+	if result.Winner != "" || len(result.Survivors) != 0 {
+		t.Fatalf("expected no winner and no survivors, got %q / %v", result.Winner, result.Survivors)
+	}
+	if result.RemainingQuestions != 1 {
+		t.Fatalf("expected 1 unplayed question, got %d", result.RemainingQuestions)
+	}
+	if err := eng.StartNextQuestion(); err != game.ErrGameFinished {
+		t.Fatalf("expected ErrGameFinished, got %v", err)
 	}
 }

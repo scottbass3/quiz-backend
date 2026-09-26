@@ -45,8 +45,13 @@ type CloseQuestionResult struct {
 	LifeDeltas []LifeDelta // detailed life info for persistence
 	Eliminated []string    // player IDs who reached 0 lives
 	GameOver   bool
-	Winner     string   // empty if draw / no survivors
-	Survivors  []string // active players when the game ended (set only if GameOver)
+	Winner     string                // empty if draw / no survivors
+	Survivors  []string              // active players when the game ended (set only if GameOver)
+	Reason     domain.GameOverReason // why the game ended (set only if GameOver)
+
+	// RemainingQuestions is the number of questions not played yet. It can be
+	// non-zero on game over when the game ended by elimination.
+	RemainingQuestions int
 }
 
 type Engine struct {
@@ -158,7 +163,11 @@ func (e *Engine) StartNextQuestion() error {
 
 	e.mu.Lock()
 	if e.game.Status == domain.GameStatusFinished {
+		reason := e.game.EndReason
 		e.mu.Unlock()
+		if reason == domain.GameOverNoMoreQuestions {
+			return ErrNoMoreQuestions
+		}
 		return ErrGameFinished
 	}
 
@@ -181,6 +190,7 @@ func (e *Engine) StartNextQuestion() error {
 			"question_id": q.ID,
 			"index":       nextIdx,
 			"total":       total,
+			"is_last":     nextIdx == total-1,
 			"text":        q.Text,
 			"options":     q.Options,
 		},
@@ -279,9 +289,18 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 	// has been played. In the latter case the survivor with the most lives wins;
 	// a tie on lives is a draw (no winner).
 	active := e.activePlayers()
-	lastQuestion := e.game.CurrentQIdx == len(e.game.Questions)-1
-	if len(active) <= 1 || lastQuestion {
+	result.RemainingQuestions = len(e.game.Questions) - e.game.CurrentQIdx - 1
+	switch {
+	case len(active) == 1:
+		result.Reason = domain.GameOverLastPlayerStanding
+	case len(active) == 0:
+		result.Reason = domain.GameOverAllEliminated
+	case result.RemainingQuestions == 0:
+		result.Reason = domain.GameOverNoMoreQuestions
+	}
+	if result.Reason != "" {
 		e.game.Status = domain.GameStatusFinished
+		e.game.EndReason = result.Reason
 		result.GameOver = true
 		result.Survivors = active
 		result.Winner = e.leaderLocked(active)
@@ -315,8 +334,9 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 	e.hub.Broadcast(domain.Event{
 		Type: domain.EventQuestionClosed,
 		Payload: map[string]any{
-			"question_id":       questionID,
-			"correct_option_id": correctOptionID,
+			"question_id":         questionID,
+			"correct_option_id":   correctOptionID,
+			"remaining_questions": result.RemainingQuestions,
 		},
 	})
 	for _, pid := range result.LifeLost {
@@ -340,6 +360,7 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 		e.hub.Broadcast(domain.Event{
 			Type: domain.EventGameOver,
 			Payload: map[string]any{
+				"reason":    result.Reason,
 				"winner_id": winner,
 				"survivors": result.Survivors,
 			},
