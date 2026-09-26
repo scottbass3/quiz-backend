@@ -450,7 +450,7 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 
 	client := appws.NewClient(conn, playerID, gameID, h.logger)
 	hub.Register(playerID, client)
-	defer hub.Unregister(playerID)
+	defer hub.Unregister(playerID, client)
 
 	// Notify the player they have joined. This goes straight to the local hub
 	// (not through Redis) so it arrives before the pumps start.

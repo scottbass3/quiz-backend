@@ -23,15 +23,26 @@ func NewHub(logger *slog.Logger) *Hub {
 	}
 }
 
+// Register makes c the connection of playerID. A player has at most one
+// connection: when they reconnect, the previous connection is closed.
 func (h *Hub) Register(playerID string, c *Client) {
 	h.mu.Lock()
+	old := h.clients[playerID]
 	h.clients[playerID] = c
 	h.mu.Unlock()
+
+	if old != nil && old != c {
+		old.Close()
+	}
 }
 
-func (h *Hub) Unregister(playerID string) {
+// Unregister removes c if it is still the connection of playerID. A replaced
+// connection that shuts down after a reconnect leaves the new one in place.
+func (h *Hub) Unregister(playerID string, c *Client) {
 	h.mu.Lock()
-	delete(h.clients, playerID)
+	if h.clients[playerID] == c {
+		delete(h.clients, playerID)
+	}
 	h.mu.Unlock()
 }
 

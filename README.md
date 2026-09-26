@@ -322,6 +322,8 @@ The connection is authenticated like any other request (session cookie, or debug
 | `403`  | player not in the game, or owned by another actor |
 | `404`  | unknown game                             |
 
+A player has at most one connection. Reconnecting (for example after a page reload) closes the previous connection and events go to the new one.
+
 The server pings every 54s and closes the connection if no pong arrives within 60s. Messages are limited to 4 KB.
 
 ### Server → client events

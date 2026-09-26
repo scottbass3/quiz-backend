@@ -119,7 +119,7 @@ Docker Compose only passes the variables listed under `api.environment` in `dock
 
 Each game has one `ws.Hub` (held in `app.gameSessionStore`). When a player connects to `/ws?gameId=&playerId=`:
 1. The handler looks up the engine and checks that the player exists and belongs to the current actor.
-2. A `ws.Client` is created (buffered send channel, 256 msgs).
+2. A `ws.Client` is created (buffered send channel, 256 msgs) and registered in the hub. One connection per player: `Hub.Register` closes the connection it replaces, and `Hub.Unregister(playerID, client)` only removes that exact client, so a replaced connection shutting down never unregisters the new one.
 3. `WritePump` and `ReadPump` run in separate goroutines.
 4. `game_joined` is sent to the player immediately.
 5. Incoming client messages (`submit_answer`) are routed back to the engine.
