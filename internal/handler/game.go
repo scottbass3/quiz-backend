@@ -229,7 +229,7 @@ func (h *GameHandler) JoinGame(w http.ResponseWriter, r *http.Request) {
 			ID:        playerID,
 			GameID:    gameID,
 			Name:      req.PlayerName,
-			Lives:     h.cfg.InitialLives,
+			Lives:     eng.Config().InitialLives,
 			Active:    true,
 			CreatedAt: time.Now().UTC(),
 		}); err != nil {

@@ -75,6 +75,11 @@ type Engine struct {
 	onQuestionClosed func(*CloseQuestionResult)
 }
 
+// Config returns the per-game configuration the engine was created with.
+func (e *Engine) Config() EngineConfig {
+	return e.cfg // immutable after NewEngine
+}
+
 // OnQuestionClosed registers fn to be called after every question close,
 // whether triggered by CloseQuestion or by the answer timeout. It runs on the
 // closing goroutine after events are broadcast and the lock is released.
