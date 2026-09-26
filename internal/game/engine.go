@@ -19,6 +19,7 @@ var (
 	ErrNoMoreQuestions     = errors.New("no more questions")
 	ErrNoActiveQuestion    = errors.New("no active question")
 	ErrWrongQuestion       = errors.New("question id does not match active question")
+	ErrQuestionOpen        = errors.New("current question is still open")
 )
 
 type EngineConfig struct {
@@ -171,6 +172,10 @@ func (e *Engine) StartNextQuestion() error {
 		}
 		return ErrGameFinished
 	}
+	if e.game.QuestionOpen {
+		e.mu.Unlock()
+		return ErrQuestionOpen
+	}
 
 	nextIdx := e.game.CurrentQIdx + 1
 	if nextIdx >= len(e.game.Questions) {
@@ -180,6 +185,7 @@ func (e *Engine) StartNextQuestion() error {
 
 	e.game.Status = domain.GameStatusRunning
 	e.game.CurrentQIdx = nextIdx
+	e.game.QuestionOpen = true
 	q := e.game.Questions[nextIdx]
 	total := len(e.game.Questions)
 	timeout := e.cfg.AnswerTimeoutSeconds
@@ -238,7 +244,7 @@ func (e *Engine) SubmitAnswer(playerID, questionID, optionID string) error {
 		e.mu.Unlock()
 		return ErrPlayerEliminated
 	}
-	if e.game.CurrentQIdx < 0 {
+	if !e.game.QuestionOpen {
 		e.mu.Unlock()
 		return ErrNoActiveQuestion
 	}
@@ -282,11 +288,12 @@ func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
 		e.mu.Unlock()
 		return nil, ErrGameNotRunning
 	}
-	if e.game.CurrentQIdx < 0 {
+	if !e.game.QuestionOpen {
 		e.mu.Unlock()
 		return nil, ErrNoActiveQuestion
 	}
 
+	e.game.QuestionOpen = false
 	q := e.game.Questions[e.game.CurrentQIdx]
 	result := &CloseQuestionResult{}
 

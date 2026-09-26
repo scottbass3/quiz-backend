@@ -21,6 +21,7 @@ func TestWriteGameError(t *testing.T) {
 		game.ErrGameFinished:     "game_finished",
 		game.ErrGameNotRunning:   "game_not_running",
 		game.ErrNoActiveQuestion: "no_active_question",
+		game.ErrQuestionOpen:     "question_open",
 		errors.New("other"):      "conflict",
 	}
 	for err, want := range cases {

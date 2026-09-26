@@ -72,7 +72,8 @@ type Game struct {
 	QuestionListID string // references the list this game was created from
 	Players        map[string]*Player
 	Questions      []*Question    // runtime copy, loaded from the list at game creation
-	CurrentQIdx    int            // -1 means no active question
+	CurrentQIdx    int            // index of the last started question, -1 before the first
+	QuestionOpen   bool           // true between question_started and question_closed
 	EndReason      GameOverReason // empty until the game is finished
 	CreatedAt      time.Time
 }

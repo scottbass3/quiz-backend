@@ -280,6 +280,7 @@ func (h *GameHandler) GetGame(w http.ResponseWriter, r *http.Request) {
 		"question_list_id":    snap.QuestionListID,
 		"players":             players,
 		"current_q_idx":       snap.CurrentQIdx,
+		"question_open":       snap.QuestionOpen,
 		"total_questions":     len(snap.Questions),
 		"remaining_questions": len(snap.Questions) - snap.CurrentQIdx - 1,
 		"end_reason":          snap.EndReason,
@@ -387,6 +388,8 @@ func writeGameError(w http.ResponseWriter, err error) {
 		code = "game_not_running"
 	case errors.Is(err, game.ErrNoActiveQuestion):
 		code = "no_active_question"
+	case errors.Is(err, game.ErrQuestionOpen):
+		code = "question_open"
 	}
 	writeErrorCode(w, http.StatusConflict, code, err.Error())
 }

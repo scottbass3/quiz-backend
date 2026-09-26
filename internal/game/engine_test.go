@@ -3,6 +3,7 @@ package game_test
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scottbass3/quizz-backend/internal/domain"
 	"github.com/scottbass3/quizz-backend/internal/game"
@@ -423,5 +424,94 @@ func TestGameOver_AllEliminated(t *testing.T) {
 	}
 	if err := eng.StartNextQuestion(); err != game.ErrGameFinished {
 		t.Fatalf("expected ErrGameFinished, got %v", err)
+	}
+}
+
+// twoQuestionEngine returns a running-ready engine with two players and two questions.
+func twoQuestionEngine(hub *stubHub, cfg game.EngineConfig) *game.Engine {
+	q2 := sampleQuestion()
+	q2.ID = "q2"
+	eng := game.NewEngine("game-x", "owner-1", "", []*domain.Question{sampleQuestion(), q2}, cfg, hub)
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
+	return eng
+}
+
+func TestCloseQuestionTwice_PenalizesOnce(t *testing.T) {
+	hub := newStubHub()
+	eng := twoQuestionEngine(hub, game.EngineConfig{InitialLives: 3})
+	eng.StartNextQuestion()
+
+	if _, err := eng.CloseQuestion(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if _, err := eng.CloseQuestion(); err != game.ErrNoActiveQuestion {
+		t.Fatalf("second close: expected ErrNoActiveQuestion, got %v", err)
+	}
+	if lives := eng.Snapshot().Players["p1"].Lives; lives != 2 {
+		t.Fatalf("expected 2 lives after one missed question, got %d", lives)
+	}
+}
+
+func TestStartWhileQuestionOpen(t *testing.T) {
+	eng := twoQuestionEngine(newStubHub(), game.EngineConfig{InitialLives: 3})
+	eng.StartNextQuestion()
+
+	if err := eng.StartNextQuestion(); err != game.ErrQuestionOpen {
+		t.Fatalf("expected ErrQuestionOpen, got %v", err)
+	}
+	if idx := eng.Snapshot().CurrentQIdx; idx != 0 {
+		t.Fatalf("question must not be skipped, current index %d", idx)
+	}
+}
+
+func TestAnswerAfterClose_Rejected(t *testing.T) {
+	eng := twoQuestionEngine(newStubHub(), game.EngineConfig{InitialLives: 3})
+	eng.StartNextQuestion()
+	eng.CloseQuestion()
+
+	if err := eng.SubmitAnswer("p1", "q1", "b"); err != game.ErrNoActiveQuestion {
+		t.Fatalf("expected ErrNoActiveQuestion, got %v", err)
+	}
+}
+
+// A manual close before the timeout must not be followed by a second close
+// when the timer fires.
+func TestAnswerTimeout_AfterManualCloseDoesNothing(t *testing.T) {
+	hub := newStubHub()
+	eng := twoQuestionEngine(hub, game.EngineConfig{InitialLives: 3, AnswerTimeoutSeconds: 1})
+	eng.StartNextQuestion()
+	eng.CloseQuestion()
+
+	time.Sleep(1300 * time.Millisecond)
+
+	if lives := eng.Snapshot().Players["p1"].Lives; lives != 2 {
+		t.Fatalf("expected 2 lives, got %d (question closed twice)", lives)
+	}
+	closed := 0
+	for _, typ := range hub.broadcastTypes() {
+		if typ == domain.EventQuestionClosed {
+			closed++
+		}
+	}
+	if closed != 1 {
+		t.Fatalf("expected exactly one question_closed, got %d", closed)
+	}
+}
+
+func TestAnswerTimeout_ClosesOpenQuestion(t *testing.T) {
+	hub := newStubHub()
+	eng := twoQuestionEngine(hub, game.EngineConfig{InitialLives: 3, AnswerTimeoutSeconds: 1})
+	eng.StartNextQuestion()
+	eng.SubmitAnswer("p1", "q1", "b")
+
+	time.Sleep(1300 * time.Millisecond)
+
+	snap := eng.Snapshot()
+	if snap.QuestionOpen {
+		t.Fatal("question should have been closed by the timeout")
+	}
+	if snap.Players["p1"].Lives != 3 || snap.Players["p2"].Lives != 2 {
+		t.Fatalf("unexpected lives p1=%d p2=%d", snap.Players["p1"].Lives, snap.Players["p2"].Lives)
 	}
 }
