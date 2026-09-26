@@ -2,7 +2,7 @@
 
 ## Commands
 
-Common commands are listed in the Makefile.
+Common commands are listed in the Makefile (`make test` runs `go test ./... -race -count=1`).
 
 The test-ui (Vite dev server) is at **http://localhost:5173**.
 The API is at **http://localhost:8080** (overridable via `HTTP_PORT` in `.env`).
@@ -13,21 +13,22 @@ The API is at **http://localhost:8080** (overridable via `HTTP_PORT` in `.env`).
 
 ```
 HTTP/WS request
-  → chi router (internal/app/app.go)
+  → chi router + auth.Middleware (internal/app/app.go, internal/auth/)
   → handler (internal/handler/game.go or question_list.go)
-  → game.Engine (internal/game/engine.go)      ← all runtime game state lives here
-  → game.Broadcaster (internal/ws/hub.go)      ← fan-out to WS clients
-  → postgres.DB (internal/postgres/)           ← persistence (best-effort, non-fatal)
+  → game.Engine (internal/game/engine.go)            ← all runtime game state lives here
+  → redis.PubSubBroadcaster (internal/redis/)        ← publishes events to game:<id>:events
+  → ws.Hub (internal/ws/hub.go)                      ← fan-out to WS clients
+  → postgres.DB (internal/postgres/)                 ← persistence (best-effort, non-fatal)
 ```
 
 ### Catalog vs runtime separation
 
 **Catalog** (persisted in Postgres):
-- `question_lists` table — name, visibility, owner
-- `question_list_questions` table — ordered questions per list
+- `question_lists` table: name, visibility, owner
+- `question_list_questions` table: ordered questions per list
 
 **Runtime** (in-memory only):
-- `game.Engine` — holds a copy of the questions loaded from the list at game creation, plus player state and answers
+- `game.Engine`: holds a copy of the questions loaded from the list at game creation, plus player state and answers
 - Questions are copied from the catalog once when `POST /games` is called; the engine never reads Postgres again
 
 This means game state survives temporary DB outages, but does not survive a server restart.
@@ -36,7 +37,21 @@ This means game state survives temporary DB outages, but does not survive a serv
 
 Game state is **in-memory only** (`game.Engine`, one per game). The engine holds a `sync.RWMutex`. The critical rule: **events are broadcast after releasing the lock** to avoid contention with the hub. Any method that mutates state follows the pattern: lock → mutate → collect event data → unlock → broadcast.
 
+`Engine.Snapshot()` returns a deep copy (players, questions, answers) so callers can read it after the lock is released. Never hand out pointers into `e.game`.
+
 `game.Manager` is the in-memory registry of all active engines.
+
+Game rules: a wrong or missing answer costs one life, 0 lives means eliminated. `CloseQuestion` ends the game when at most one active player is left, or after the last question; in that case the survivor with the most lives wins and a tie is a draw (empty winner). `CloseQuestionResult.Survivors` lists the active players at the end.
+
+### Game access rules
+
+- Each `domain.Player` records the `ActorID` (`auth.Actor.Sub`) that created it (`AddPlayer(id, name, actorID)`).
+- The **host** is the actor that owns the game's owner player (`Engine.HostActorID()`). Only the host can `POST /games/{id}/start` and `/close` (403 otherwise).
+- `/ws` requires the current actor to own `playerId` (`Engine.PlayerActorID()`), 403 otherwise.
+
+### Eviction
+
+`App.sweepGames` runs every minute and calls `Manager.Sweep`, which removes games for which `Engine.Expired` is true: finished games after `GAME_FINISHED_TTL` (default 10m), other games after `GAME_IDLE_TTL` (default 2h) without activity. For each removed game, `gameSessionStore.Remove` stops the Redis subscription and closes the WebSocket connections (`Hub.CloseAll`).
 
 ### Redis pub/sub broadcaster
 
@@ -44,13 +59,15 @@ Game state is **in-memory only** (`game.Engine`, one per game). The engine holds
 - `Broadcast` / `BroadcastTo` → publish to channel `game:<id>:events`
 - A subscriber goroutine reads from that channel → forwards to the local `ws.Hub` → WS clients
 
-This makes the event path horizontally scalable: multiple API instances subscribe to the same channel and each forwards to their own WS connections. The broadcaster is created per-game in `app.gameSessionStore.GetOrCreate`. All broadcasters are stopped (`Stop()`) during graceful shutdown.
+The broadcaster and hub are created per game in `app.gameSessionStore.GetOrCreate`, released by `Remove` on eviction, and all stopped during graceful shutdown.
+
+The event path could fan out across instances, but game state is still held in the memory of the instance that created the game. Running several instances therefore requires routing every request of a game (HTTP and WS) to the same instance. Do not describe the backend as horizontally scalable.
 
 **Note:** `game_joined` is sent directly via `hub.BroadcastTo` (bypassing Redis) because it is a connection handshake that must arrive immediately and synchronously before the read/write pumps start.
 
 ### Postgres persistence
 
-Writes are best-effort (non-fatal — logged but don't abort requests):
+Writes are best-effort (non-fatal: logged but don't abort requests):
 
 | Operation               | Persisted fields                          |
 |-------------------------|-------------------------------------------|
@@ -59,23 +76,27 @@ Writes are best-effort (non-fatal — logged but don't abort requests):
 | `POST /games/{id}/start`| `games.status = 'running'`                |
 | `POST /games/{id}/close`| `players.lives` + `players.active` for every player who lost a life; `games.status = 'finished'` if game over |
 
+The player's actor ID is not persisted.
+
 ### Authentication
 
 Auth lives in `internal/auth/`. Two modes controlled by `OIDC_ENABLED`:
 
-**Dev mode (`OIDC_ENABLED=false`, default):** `auth.Middleware` reads `X-Debug-Actor-Type` / `X-Debug-Actor-Id` request headers and populates the context with an `auth.Actor`. No session required.
+**Dev mode (`OIDC_ENABLED=false`, default):** `auth.Middleware` reads `X-Debug-Actor-Type` / `X-Debug-Actor-Id` request headers and populates the context with an `auth.Actor`. Since browsers cannot set headers on a WebSocket handshake, the `debugActorType` / `debugActorId` query parameters are accepted as a fallback (headers win). No session required.
 
 **OIDC mode (`OIDC_ENABLED=true`):** Standard Authorization Code Flow.
-1. `GET /auth/login` — generates `state`+`nonce`, stores them in a signed JWT cookie (`oauth2_state`), redirects to the OIDC provider.
-2. `GET /auth/callback` — verifies state cookie, exchanges code for ID token, validates nonce, issues a signed session JWT as `quizz_session` cookie (HttpOnly, 24h TTL), redirects to `OIDC_FRONTEND_URL`.
+1. `GET /auth/login`: generates `state`+`nonce`, stores them in a signed JWT cookie (`oauth2_state`), redirects to the OIDC provider.
+2. `GET /auth/callback`: verifies state cookie, exchanges code for ID token, validates nonce, issues a signed session JWT as `quizz_session` cookie (HttpOnly, 24h TTL), redirects to `OIDC_FRONTEND_URL`.
 3. `auth.Middleware` validates the `quizz_session` cookie on every protected request and sets the actor in context.
-4. `POST /auth/logout` — clears the cookie.
+4. `POST /auth/logout`: clears the cookie.
 
 Role mapping: the claim named `OIDC_ROLE_CLAIM` (default: `role`) is checked; if it equals `OIDC_ADMIN_ROLE` (default: `admin`), the actor gets `ActorTypeAdmin`, otherwise `ActorTypeUser`. Both scalar string and string array claim values are handled.
 
 All routes except `/health`, `/auth/login`, `/auth/callback`, and `/auth/logout` are protected by `auth.Middleware`.
 
-`extractActor` in `internal/handler/actor.go` reads the actor from the context set by the middleware — it is the only place handlers access identity.
+`extractActor` in `internal/handler/actor.go` reads the actor from the context set by the middleware. It is the only place handlers access identity.
+
+Docker Compose only passes the variables listed under `api.environment` in `docker-compose.yml`. A new config variable must be added there too, or it will be ignored under `make up`.
 
 ### Question lists and access rules
 
@@ -85,8 +106,8 @@ All routes except `/health`, `/auth/login`, `/auth/callback`, and `/auth/logout`
 
 ### WebSocket lifecycle
 
-Each game has one `ws.Hub` (registered in `app.hubStore`). When a player connects to `/ws?gameId=&playerId=`:
-1. The handler looks up the engine and verifies the player exists.
+Each game has one `ws.Hub` (held in `app.gameSessionStore`). When a player connects to `/ws?gameId=&playerId=`:
+1. The handler looks up the engine and checks that the player exists and belongs to the current actor.
 2. A `ws.Client` is created (buffered send channel, 256 msgs).
 3. `WritePump` and `ReadPump` run in separate goroutines.
 4. `game_joined` is sent to the player immediately.
@@ -94,7 +115,7 @@ Each game has one `ws.Hub` (registered in `app.hubStore`). When a player connect
 
 ### Migrations
 
-SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Two files are concatenated: `001_initial.sql` (base tables) and `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`). `app.New()` calls `pg.RunMigrations()` on every startup — safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
+SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Two files are concatenated: `001_initial.sql` (base tables) and `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`). `app.New()` calls `pg.RunMigrations()` on every startup, which is safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
 
 To add a migration: create `00N_name.sql`, embed it in `migrations.go`, and append it to `SQL`.
 
@@ -102,12 +123,16 @@ To add a migration: create `00N_name.sql`, embed it in `migrations.go`, and appe
 
 Vite + Vue 3 + TypeScript dev tool, not production code. All HTTP calls go through Vite's proxy (`/api/*` → backend, `/ws` → backend WS) so there are no CORS issues. `VITE_API_TARGET` controls the proxy target.
 
-The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected as `X-Debug-Actor-*` headers in dev mode). `fetchSession()` calls `GET /auth/me` on mount and populates `sessionUser`. `ActorBar.vue` shows OIDC user info + logout when `oidc_enabled: true`, or the debug controls when `oidc_enabled: false`.
+The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected as `X-Debug-Actor-*` headers in dev mode). `PlayerCard.vue` remembers the actor used at join time and passes it as `debugActorType` / `debugActorId` on the WS URL. `fetchSession()` calls `GET /auth/me` on mount and populates `sessionUser`. `ActorBar.vue` shows OIDC user info + logout when `oidc_enabled: true`, or the debug controls when `oidc_enabled: false`.
 
 ## Key design constraints
 
-- `game.Engine` has no knowledge of transport (HTTP/WS) or storage — it takes a `Broadcaster` interface.
-- `ws.Hub` implements `game.Broadcaster` — the only coupling point between game logic and WebSocket.
-- `store.GameStore` / `PlayerStore` / `QuestionListStore` are interfaces; `postgres.DB` implements all three. Passing `nil` for the stores in tests is valid.
-- `game.Engine.AddQuestion` is kept for test convenience only — HTTP no longer exposes it. Production games get their questions from the list at creation time.
-- The `go build` in `.air.toml` uses `-buildvcs=false` — required because the container can't access git metadata.
+- `game.Engine` has no knowledge of transport (HTTP/WS) or storage: it takes a `Broadcaster` interface.
+- `game.Broadcaster` is the only coupling point between game logic and delivery. `redis.PubSubBroadcaster` implements it in the app; `ws.Hub` implements it too and is what the Redis subscriber forwards to.
+- `store.GameStore` / `PlayerStore` / `QuestionListStore` are interfaces; `postgres.DB` implements all three. `GameStore` and `PlayerStore` may be `nil` in handler tests.
+- `game.Engine.AddQuestion` is kept for test convenience only; HTTP no longer exposes it. Production games get their questions from the list at creation time.
+- The `go build` in `.air.toml` uses `-buildvcs=false`, required because the container can't access git metadata.
+
+## Documentation
+
+- Do not use em dashes in documentation.
