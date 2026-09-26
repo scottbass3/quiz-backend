@@ -1,6 +1,6 @@
 import { addHttpLog } from './debug'
 import { actor } from './actor'
-import type { QuestionListRecord, QuestionRecord, Option } from './types'
+import type { QuestionListRecord, QuestionRecord, Option, GameOverReason } from './types'
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const url = `/api${path}`
@@ -88,7 +88,15 @@ export const api = {
     call<unknown>('POST', `/games/${gameId}/start`),
 
   closeQuestion: (gameId: string) =>
-    call<{ life_lost: string[]; eliminated: string[]; game_over: boolean; winner: string; survivors: string[] | null }>(
+    call<{
+      life_lost: string[] | null
+      eliminated: string[] | null
+      game_over: boolean
+      winner: string
+      survivors: string[] | null
+      reason: GameOverReason | ''
+      remaining_questions: number
+    }>(
       'POST', `/games/${gameId}/close`
     ),
 

@@ -2,7 +2,7 @@
 import { ref, computed, onUnmounted } from 'vue'
 import { api } from '../api'
 import { actor } from '../actor'
-import type { WsEvent, EventLogEntry, ActiveQuestion, WsStatus } from '../types'
+import type { WsEvent, EventLogEntry, ActiveQuestion, WsStatus, GameOverInfo } from '../types'
 
 const props = defineProps<{
   gameId: string
@@ -32,6 +32,21 @@ const expandedId = ref<string | null>(null)
 // ── Current question from WS events ──
 const activeQuestion = ref<ActiveQuestion | null>(null)
 const answeredQuestionId = ref<string | null>(null)
+const gameOver = ref<GameOverInfo | null>(null)
+
+const gameOverText = computed(() => {
+  const g = gameOver.value
+  if (!g) return ''
+  const outcome = g.winner_id === playerId.value ? 'you win'
+    : g.winner_id ? `winner: ${g.winner_id.slice(0, 8)}…`
+    : (g.survivors?.length ?? 0) > 1 ? 'draw' : 'no winner'
+  const why = {
+    last_player_standing: 'last player standing',
+    all_eliminated: 'everyone eliminated',
+    no_more_questions: 'no more questions',
+  }[g.reason] ?? g.reason
+  return `game over: ${why} · ${outcome}`
+})
 
 // ── Join ──
 async function join() {
@@ -40,6 +55,7 @@ async function join() {
   try {
     const res = await api.joinGame(props.gameId, playerName.value.trim() || `Player${props.slotIndex + 1}`)
     playerId.value = res.player_id
+    gameOver.value = null
     joinedAs.value = { type: actor.type, id: actor.id }
     joined.value = true
   } catch (e) {
@@ -116,6 +132,7 @@ function handleEvent(event: WsEvent) {
       break
     case 'game_over':
       activeQuestion.value = null
+      gameOver.value = event.payload as unknown as GameOverInfo
       break
   }
 }
@@ -208,7 +225,7 @@ onUnmounted(() => ws.value?.close())
       <!-- Active question -->
       <div v-if="activeQuestion" class="question-box">
         <div class="label">
-          Q{{ activeQuestion.index + 1 }}/{{ activeQuestion.total }}
+          Q{{ activeQuestion.index + 1 }}/{{ activeQuestion.total }}<span v-if="activeQuestion.is_last"> · last question</span>
         </div>
         <div class="question-text">{{ activeQuestion.text }}</div>
         <div class="option-grid">
@@ -231,6 +248,9 @@ onUnmounted(() => ws.value?.close())
           answer submitted ✓
         </div>
       </div>
+
+      <!-- Game over -->
+      <div v-if="gameOver" class="question-box" style="font-size:12px">{{ gameOverText }}</div>
 
       <!-- Event log -->
       <div>

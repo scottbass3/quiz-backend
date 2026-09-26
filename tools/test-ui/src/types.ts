@@ -18,8 +18,17 @@ export interface ActiveQuestion {
   question_id: string
   index: number
   total: number
+  is_last: boolean
   text: string
   options: Option[]
+}
+
+export type GameOverReason = 'last_player_standing' | 'all_eliminated' | 'no_more_questions'
+
+export interface GameOverInfo {
+  reason: GameOverReason
+  winner_id: string
+  survivors: string[] | null
 }
 
 export interface HttpLogEntry {
