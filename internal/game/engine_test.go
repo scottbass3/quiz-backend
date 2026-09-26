@@ -515,3 +515,24 @@ func TestAnswerTimeout_ClosesOpenQuestion(t *testing.T) {
 		t.Fatalf("unexpected lives p1=%d p2=%d", snap.Players["p1"].Lives, snap.Players["p2"].Lives)
 	}
 }
+
+func TestQuestionStartedCarriesTheme(t *testing.T) {
+	hub := newStubHub()
+	themed := sampleQuestion()
+	themed.Theme = &domain.QuestionTheme{ID: "t1", Name: "Math", Scope: "global"}
+	plain := sampleQuestion()
+	plain.ID = "q2"
+	eng := game.NewEngine("g", "owner-1", "", []*domain.Question{themed, plain}, game.EngineConfig{InitialLives: 3}, hub)
+	eng.AddPlayer("p1", "Alice", "actor-1")
+	eng.AddPlayer("p2", "Bob", "actor-2")
+
+	eng.StartNextQuestion()
+	if got, _ := hub.lastPayload(t, domain.EventQuestionStarted)["theme"].(*domain.QuestionTheme); got == nil || got.Name != "Math" {
+		t.Fatalf("expected theme Math in question_started, got %v", got)
+	}
+	eng.CloseQuestion()
+	eng.StartNextQuestion()
+	if got, _ := hub.lastPayload(t, domain.EventQuestionStarted)["theme"].(*domain.QuestionTheme); got != nil {
+		t.Fatalf("expected no theme, got %+v", got)
+	}
+}

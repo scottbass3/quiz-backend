@@ -96,7 +96,16 @@ type Question struct {
 	Options         []Option
 	CorrectOptionID string
 	OrderIndex      int
+	Theme           *QuestionTheme     // optional, nil when the question has no theme
 	Answers         map[string]*Answer // runtime only
+}
+
+// QuestionTheme is the theme of a question as sent to players.
+// Scope is "global" or "list".
+type QuestionTheme struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Scope string `json:"scope"`
 }
 
 type Option struct {

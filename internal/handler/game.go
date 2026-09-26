@@ -141,6 +141,9 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 			OrderIndex:      qr.OrderIndex,
 			Answers:         make(map[string]*domain.Answer),
 		}
+		if qr.Theme != nil {
+			questions[i].Theme = &domain.QuestionTheme{ID: qr.Theme.ID, Name: qr.Theme.Name, Scope: string(qr.Theme.Scope)}
+		}
 	}
 
 	gameID := uuid.NewString()

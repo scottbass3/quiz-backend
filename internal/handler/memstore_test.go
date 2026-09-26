@@ -198,7 +198,7 @@ func (m *memStore) DeleteTheme(_ context.Context, id string) error {
 func catalogServer(t *testing.T, m *memStore) *httptest.Server {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	qlH := NewQuestionListHandler(m, logger)
+	qlH := NewQuestionListHandler(m, m, logger)
 	themeH := NewThemeHandler(m, m, logger)
 
 	r := chi.NewRouter()
@@ -207,6 +207,7 @@ func catalogServer(t *testing.T, m *memStore) *httptest.Server {
 		r.Post("/", qlH.Create)
 		r.Get("/{id}/questions", qlH.ListQuestions)
 		r.Post("/{id}/questions", qlH.AddQuestion)
+		r.Put("/{id}/questions/{questionID}", qlH.UpdateQuestion)
 		r.Get("/{id}/themes", themeH.ListForList)
 		r.Post("/{id}/themes", themeH.CreateForList)
 		r.Get("/{id}/themes/{themeID}", themeH.GetForList)

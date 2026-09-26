@@ -176,7 +176,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	// ── Handlers ────────────────────────────────────────────────────────────────
 
 	gameH := handler.NewGameHandler(manager, sessions, gs, ps, qls, defaultEngineCfg, logger)
-	qlH := handler.NewQuestionListHandler(qls, logger)
+	qlH := handler.NewQuestionListHandler(qls, ts, logger)
 	themeH := handler.NewThemeHandler(ts, qls, logger)
 	healthH := handler.NewHealthHandler()
 	authH := handler.NewAuthHandler(oidcProvider, sessionSecret, cfg.OIDCFrontendURL, cfg.OIDCEnabled, logger)
@@ -219,6 +219,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 			r.Get("/{id}", qlH.Get)
 			r.Get("/{id}/questions", qlH.ListQuestions)
 			r.Post("/{id}/questions", qlH.AddQuestion)
+			r.Put("/{id}/questions/{questionID}", qlH.UpdateQuestion)
 
 			// Custom themes of a list.
 			r.Get("/{id}/themes", themeH.ListForList)

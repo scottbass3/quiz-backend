@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -14,11 +15,12 @@ import (
 
 type QuestionListHandler struct {
 	store  store.QuestionListStore
+	themes store.ThemeStore
 	logger *slog.Logger
 }
 
-func NewQuestionListHandler(s store.QuestionListStore, logger *slog.Logger) *QuestionListHandler {
-	return &QuestionListHandler{store: s, logger: logger}
+func NewQuestionListHandler(s store.QuestionListStore, themes store.ThemeStore, logger *slog.Logger) *QuestionListHandler {
+	return &QuestionListHandler{store: s, themes: themes, logger: logger}
 }
 
 // POST /question-lists
@@ -150,76 +152,142 @@ func (h *QuestionListHandler) ListQuestions(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to list questions")
 		return
 	}
-	if questions == nil {
-		questions = []store.QuestionRecord{}
+
+	// Optional filter: ?theme_id=<id>, or ?theme_id=none for unthemed questions.
+	out := []store.QuestionRecord{}
+	themeFilter, filtered := r.URL.Query()["theme_id"]
+	for _, q := range questions {
+		if filtered && !matchesTheme(q, themeFilter[0]) {
+			continue
+		}
+		out = append(out, q)
 	}
-	writeJSON(w, http.StatusOK, questions)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// matchesTheme implements the theme_id filter of ListQuestions.
+func matchesTheme(q store.QuestionRecord, filter string) bool {
+	if filter == "none" {
+		return q.ThemeID == ""
+	}
+	return q.ThemeID == filter
+}
+
+// questionRequest is the body of POST and PUT on questions.
+type questionRequest struct {
+	Text    string `json:"text"`
+	Options []struct {
+		ID   string `json:"id"`
+		Text string `json:"text"`
+	} `json:"options"`
+	CorrectOptionID string `json:"correct_option_id"`
+	// ThemeID is optional: empty or null means no theme.
+	ThemeID string `json:"theme_id"`
+}
+
+// decodeQuestion validates a question body. Empty option IDs are generated;
+// correct_option_id must match one of the options.
+func decodeQuestion(w http.ResponseWriter, r *http.Request) (*questionRequest, []store.OptionRecord, bool) {
+	var req questionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return nil, nil, false
+	}
+	if req.Text == "" || len(req.Options) < 2 || req.CorrectOptionID == "" {
+		writeError(w, http.StatusBadRequest, "text, at least 2 options and correct_option_id are required")
+		return nil, nil, false
+	}
+
+	opts := make([]store.OptionRecord, len(req.Options))
+	seen := make(map[string]bool, len(req.Options))
+	for i, o := range req.Options {
+		id := o.ID
+		if id == "" {
+			id = uuid.NewString()
+		}
+		if seen[id] {
+			writeError(w, http.StatusBadRequest, "option ids must be unique")
+			return nil, nil, false
+		}
+		seen[id] = true
+		opts[i] = store.OptionRecord{ID: id, Text: o.Text}
+	}
+	if !seen[req.CorrectOptionID] {
+		writeError(w, http.StatusBadRequest, "correct_option_id must match one of the options")
+		return nil, nil, false
+	}
+	return &req, opts, true
+}
+
+// checkTheme validates that themeID (if set) is a global theme or a custom
+// theme of listID. It writes a 400 with a code and returns false otherwise.
+func (h *QuestionListHandler) checkTheme(w http.ResponseWriter, r *http.Request, themeID, listID string) bool {
+	if themeID == "" {
+		return true
+	}
+	t, err := h.themes.GetTheme(r.Context(), themeID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeErrorCode(w, http.StatusBadRequest, "theme_not_found", "theme not found")
+		return false
+	case err != nil:
+		h.logger.Error("get theme for question", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to check theme")
+		return false
+	case t.QuestionListID != "" && t.QuestionListID != listID:
+		writeErrorCode(w, http.StatusBadRequest, "theme_from_another_list", "theme belongs to another question list")
+		return false
+	}
+	return true
+}
+
+// loadEditableList loads the {id} list and checks the actor may edit it.
+func (h *QuestionListHandler) loadEditableList(w http.ResponseWriter, r *http.Request) (*store.QuestionListRecord, bool) {
+	a := extractActor(r)
+	list, err := h.store.GetQuestionList(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "question list not found")
+		return nil, false
+	}
+	// Public list: only admins. Private list: only the owner.
+	if !canEditList(a, list) {
+		if list.Visibility == string(domain.ListVisibilityPublic) {
+			writeError(w, http.StatusForbidden, "only admins can edit public lists")
+		} else {
+			writeError(w, http.StatusForbidden, "access denied")
+		}
+		return nil, false
+	}
+	return list, true
 }
 
 // POST /question-lists/{id}/questions
 func (h *QuestionListHandler) AddQuestion(w http.ResponseWriter, r *http.Request) {
-	a := extractActor(r)
-	listID := chi.URLParam(r, "id")
-
-	list, err := h.store.GetQuestionList(r.Context(), listID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "question list not found")
+	list, ok := h.loadEditableList(w, r)
+	if !ok {
 		return
 	}
-
-	// Write-access rules:
-	// - Public list: only admins can add questions.
-	// - Private list: only the owner can add questions.
-	if !canEditList(a, list) {
-		if list.Visibility == string(domain.ListVisibilityPublic) {
-			writeError(w, http.StatusForbidden, "only admins can add questions to public lists")
-		} else {
-			writeError(w, http.StatusForbidden, "access denied")
-		}
-		return
-	}
-
-	var req struct {
-		Text    string `json:"text"`
-		Options []struct {
-			ID   string `json:"id"`
-			Text string `json:"text"`
-		} `json:"options"`
-		CorrectOptionID string `json:"correct_option_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request")
-		return
-	}
-	if req.Text == "" || len(req.Options) < 2 || req.CorrectOptionID == "" {
-		writeError(w, http.StatusBadRequest, "text, at least 2 options and correct_option_id are required")
+	req, opts, ok := decodeQuestion(w, r)
+	if !ok || !h.checkTheme(w, r, req.ThemeID, list.ID) {
 		return
 	}
 
 	// Determine next order_index.
-	existing, err := h.store.ListQuestions(r.Context(), listID)
+	existing, err := h.store.ListQuestions(r.Context(), list.ID)
 	if err != nil {
 		h.logger.Error("list questions for order index", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to add question")
 		return
 	}
 
-	opts := make([]store.OptionRecord, len(req.Options))
-	for i, o := range req.Options {
-		id := o.ID
-		if id == "" {
-			id = uuid.NewString()
-		}
-		opts[i] = store.OptionRecord{ID: id, Text: o.Text}
-	}
-
 	q := store.QuestionRecord{
 		ID:              uuid.NewString(),
-		QuestionListID:  listID,
+		QuestionListID:  list.ID,
 		Text:            req.Text,
 		Options:         opts,
 		CorrectOptionID: req.CorrectOptionID,
 		OrderIndex:      len(existing),
+		ThemeID:         req.ThemeID,
 	}
 
 	if err := h.store.CreateQuestion(r.Context(), q); err != nil {
@@ -229,4 +297,45 @@ func (h *QuestionListHandler) AddQuestion(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]string{"question_id": q.ID})
+}
+
+// PUT /question-lists/{id}/questions/{questionID}
+// Replaces text, options, correct option and theme. The position is kept.
+func (h *QuestionListHandler) UpdateQuestion(w http.ResponseWriter, r *http.Request) {
+	list, ok := h.loadEditableList(w, r)
+	if !ok {
+		return
+	}
+	existing, err := h.store.GetQuestion(r.Context(), chi.URLParam(r, "questionID"))
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		h.logger.Error("get question", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load question")
+		return
+	}
+	if err != nil || existing.QuestionListID != list.ID {
+		writeError(w, http.StatusNotFound, "question not found")
+		return
+	}
+	req, opts, ok := decodeQuestion(w, r)
+	if !ok || !h.checkTheme(w, r, req.ThemeID, list.ID) {
+		return
+	}
+
+	existing.Text = req.Text
+	existing.Options = opts
+	existing.CorrectOptionID = req.CorrectOptionID
+	existing.ThemeID = req.ThemeID
+	if err := h.store.UpdateQuestion(r.Context(), *existing); err != nil {
+		h.logger.Error("update question", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to update question")
+		return
+	}
+
+	updated, err := h.store.GetQuestion(r.Context(), existing.ID)
+	if err != nil {
+		h.logger.Error("reload question", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load question")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }

@@ -228,6 +228,7 @@ func (e *Engine) StartNextQuestion() error {
 		"is_last":     nextIdx == total-1,
 		"text":        q.Text,
 		"options":     q.Options,
+		"theme":       q.Theme, // null when the question has no theme
 	}
 	if timeout > 0 {
 		payload["answer_timeout_seconds"] = timeout
