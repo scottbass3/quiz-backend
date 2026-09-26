@@ -27,11 +27,17 @@ Players join a game, answer multiple-choice questions over WebSocket and lose a 
 - Every player starts with `GAME_INITIAL_LIVES` lives (default 3).
 - The host starts a question, players answer over WebSocket (first answer only), then the host closes the question.
 - On close, every active player who answered wrong **or did not answer** loses one life. A player at 0 lives is eliminated.
-- The game ends when:
-  - at most one active player is left: that player wins (no winner if nobody survived), or
-  - the last question has been closed: the survivor with the most lives wins, a tie is a draw (no winner).
+- The game ends when a question is closed and one of these holds. The reason is sent to clients in `game_over`:
+
+  | Reason                 | When                                                | Winner                                        |
+  |------------------------|-----------------------------------------------------|-----------------------------------------------|
+  | `last_player_standing` | exactly one active player is left                   | that player                                   |
+  | `all_eliminated`       | every remaining player lost their last life at once | none                                          |
+  | `no_more_questions`    | the last question was played, 2+ players survive    | the survivor with the most lives, none on a tie (draw) |
 
 Game status goes `waiting` → `running` (first question started) → `finished`.
+
+Clients know in advance when the list runs out: `question_started` carries `is_last`, and `question_closed` carries `remaining_questions`.
 
 ## Architecture
 
@@ -180,7 +186,7 @@ Register `OIDC_REDIRECT_URL` as an allowed redirect URI at your provider, and se
 
 ## HTTP API
 
-All bodies are JSON. Errors are returned as `{ "error": "..." }`.
+All bodies are JSON. Errors are returned as `{ "error": "..." }`. Game state errors on start and close, and the empty list error on game creation, also carry a stable `code` to switch on: `{ "error": "no more questions", "code": "no_more_questions" }`.
 
 ### Health
 
@@ -253,6 +259,7 @@ POST /games
 { "owner_name": "Alice", "question_list_id": "..." }
 → 201 { "game_id", "owner_id", "question_list_id", "total_questions" }
   400 missing owner_name or question_list_id
+  400 code=empty_question_list: the list has no questions
   403 private list owned by someone else
   404 unknown list
 ```
@@ -271,27 +278,31 @@ The player is bound to the current actor: only that actor can open a WebSocket a
 
 ```
 GET /games/{id}
-→ 200 { "id", "status", "owner_id", "question_list_id", "players": [{ "id", "name", "lives", "active" }], "current_q_idx", "total_questions" }
+→ 200 { "id", "status", "owner_id", "question_list_id", "players": [{ "id", "name", "lives", "active" }],
+        "current_q_idx", "total_questions", "remaining_questions", "end_reason" }
   404 unknown game (or evicted)
 ```
 
-`current_q_idx` is `-1` before the first question.
+`current_q_idx` is `-1` before the first question. `remaining_questions` counts the questions not started yet. `end_reason` is empty until the game is finished, then holds the `game_over` reason.
 
 ```
 POST /games/{id}/start        (host only)
 → 200 { "status": "question started" }, broadcasts question_started
   403 not the host
-  409 game finished or no more questions
+  409 code=no_more_questions: the last question has already been played
+  409 code=game_finished: the game ended by elimination
 ```
 
 ```
 POST /games/{id}/close        (host only)
-→ 200 { "life_lost": [...], "eliminated": [...], "game_over": false, "winner": "", "survivors": null }
+→ 200 { "life_lost": [...], "eliminated": [...], "remaining_questions": 1,
+        "game_over": false, "reason": "", "winner": "", "survivors": null }
   403 not the host
-  409 game not running or no active question
+  409 code=game_not_running: game not started yet, or already finished
+  409 code=no_active_question
 ```
 
-Close broadcasts `question_closed`, then `life_lost` (privately), `player_eliminated` and `game_over` as needed. `survivors` is set only when `game_over` is true. `life_lost` and `eliminated` are `null` when empty.
+Close broadcasts `question_closed`, then `life_lost` (privately), `player_eliminated` and `game_over` as needed. `reason`, `winner` and `survivors` are only meaningful when `game_over` is true. `remaining_questions` can be above 0 on game over when the game ended by elimination. `life_lost` and `eliminated` are `null` when empty.
 
 ## WebSocket
 
@@ -316,12 +327,12 @@ Every event has the shape `{ "type": "...", "payload": { ... } }`.
 | `type`              | Sent to      | Payload                                                           |
 |---------------------|--------------|-------------------------------------------------------------------|
 | `game_joined`       | that player  | `game_id`, `player_id`, `status`, `question_list_id`, `total_questions` |
-| `question_started`  | everyone     | `question_id`, `index`, `total`, `text`, `options`                |
+| `question_started`  | everyone     | `question_id`, `index`, `total`, `is_last`, `text`, `options`     |
 | `answer_submitted`  | everyone     | `player_id`, `question_id` (correctness is not revealed)          |
-| `question_closed`   | everyone     | `question_id`, `correct_option_id`                                |
+| `question_closed`   | everyone     | `question_id`, `correct_option_id`, `remaining_questions`         |
 | `life_lost`         | that player  | `player_id`, `lives_left`                                         |
 | `player_eliminated` | everyone     | `player_id`                                                       |
-| `game_over`         | everyone     | `winner_id` (empty for a draw), `survivors`                       |
+| `game_over`         | everyone     | `reason`, `winner_id` (empty when there is no winner), `survivors` |
 
 `game_joined` is written directly to the local hub, the other events go through Redis.
 

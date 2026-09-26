@@ -41,7 +41,12 @@ Game state is **in-memory only** (`game.Engine`, one per game). The engine holds
 
 `game.Manager` is the in-memory registry of all active engines.
 
-Game rules: a wrong or missing answer costs one life, 0 lives means eliminated. `CloseQuestion` ends the game when at most one active player is left, or after the last question; in that case the survivor with the most lives wins and a tie is a draw (empty winner). `CloseQuestionResult.Survivors` lists the active players at the end.
+Game rules: a wrong or missing answer costs one life, 0 lives means eliminated. `CloseQuestion` ends the game and sets `Game.EndReason` / `CloseQuestionResult.Reason` (`domain.GameOverReason`):
+- `last_player_standing`: one active player left, they win
+- `all_eliminated`: nobody left, no winner
+- `no_more_questions`: last question played with 2+ survivors; the survivor with the most lives wins, a tie is a draw (empty winner). This draw rule is intended, keep it.
+
+Clients must be told explicitly when questions run out: `question_started.is_last`, `question_closed.remaining_questions`, `game_over.reason`, and `StartNextQuestion` returns `ErrNoMoreQuestions` (HTTP 409, `code: no_more_questions`) on a game finished by `no_more_questions`. Handlers map engine errors to stable codes in `writeGameError`.
 
 ### Game access rules
 

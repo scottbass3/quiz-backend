@@ -55,10 +55,10 @@ Il faut donc garder le même acteur entre la création de la partie, les joins e
 2. Onglet **Lists** : en `admin`, créer une liste publique et y ajouter quelques questions (ou, en `user`, une liste privée).
 3. Passer en `user` si besoin, sélectionner la liste puis, dans l'onglet **Game**, créer la partie. Le `game_id` est partagé automatiquement avec les cartes joueurs.
 4. Ajouter des cartes joueurs (6 au maximum), puis pour chacune : **join**, puis **connect ws**.
-5. **▶ start question** : chaque carte reçoit `question_started` et affiche les options.
+5. **▶ start question** : chaque carte reçoit `question_started` et affiche les options. La dernière question de la liste est signalée par « last question ».
 6. Répondre depuis les cartes : `answer_submitted` apparaît dans les journaux d'événements.
-7. **■ close question** : `question_closed`, puis `life_lost`, `player_eliminated` et `game_over` selon le cas. Le résumé (vies perdues, éliminés, vainqueur, survivants) s'affiche sous les boutons.
-8. Recommencer jusqu'à `game_over`, qui arrive quand il reste au plus un joueur actif ou après la dernière question.
+7. **■ close question** : `question_closed`, puis `life_lost`, `player_eliminated` et `game_over` selon le cas. Le résumé (vies perdues, éliminés, nombre de questions restantes) s'affiche sous les boutons.
+8. Recommencer jusqu'à `game_over`. Chaque carte affiche alors la raison (dernier joueur en vie, tout le monde éliminé, plus de questions) et l'issue (victoire, vainqueur, égalité ou aucun vainqueur). Un nouveau **start** après la dernière question renvoie une erreur `409` avec le code `no_more_questions`.
 
 À noter : le créateur de la partie est aussi un joueur (le joueur « owner ») mais n'a pas de carte. Il ne répond jamais et perd donc une vie à chaque question.
 
