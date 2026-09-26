@@ -21,6 +21,7 @@ export interface ActiveQuestion {
   is_last: boolean
   text: string
   options: Option[]
+  theme: ThemeRef | null
 }
 
 export type GameOverReason = 'last_player_standing' | 'all_eliminated' | 'no_more_questions'
@@ -78,4 +79,27 @@ export interface QuestionRecord {
   options: Option[]
   correct_option_id: string
   order_index: number
+  theme: ThemeRef | null
+}
+
+// ── Themes ───────────────────────────────────────────────────────────────────
+
+// global: managed by admins, usable by every list. list: custom theme of one list.
+export type ThemeScope = 'global' | 'list'
+
+export interface ThemeRecord {
+  id: string
+  scope: ThemeScope
+  question_list_id?: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
+}
+
+// Short form embedded in questions and in question_started.
+export interface ThemeRef {
+  id: string
+  name: string
+  scope: ThemeScope
 }

@@ -242,6 +242,8 @@ button.success:hover { background: #1a2e1a; }
 .http-method { font-weight: bold; }
 .http-method.GET    { color: var(--green); }
 .http-method.POST   { color: var(--blue); }
+.http-method.PUT    { color: var(--yellow); }
+.http-method.DELETE { color: var(--red); }
 .http-entry.err .http-url { color: var(--red); }
 .http-ts { color: var(--muted); margin-left: 6px; font-size: 10px; }
 .http-dur { color: var(--muted); margin-left: 6px; font-size: 10px; }
@@ -315,3 +317,8 @@ button.success:hover { background: #1a2e1a; }
 .label   { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
 .game-id { color: var(--blue); font-size: 12px; word-break: break-all; }
 code { background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; font-size: 10px; }
+
+/* ── Themes ── */
+.theme-tag { display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 8px; margin-left: 4px; border: 1px solid; }
+.theme-tag.global { color: var(--blue); border-color: var(--blue); }
+.theme-tag.list   { color: var(--orange); border-color: var(--orange); }

@@ -226,6 +226,7 @@ onUnmounted(() => ws.value?.close())
       <div v-if="activeQuestion" class="question-box">
         <div class="label">
           Q{{ activeQuestion.index + 1 }}/{{ activeQuestion.total }}<span v-if="activeQuestion.is_last"> · last question</span>
+          <span v-if="activeQuestion.theme" class="theme-tag" :class="activeQuestion.theme.scope">{{ activeQuestion.theme.name }}</span>
         </div>
         <div class="question-text">{{ activeQuestion.text }}</div>
         <div class="option-grid">

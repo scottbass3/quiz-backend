@@ -1,6 +1,6 @@
 import { addHttpLog } from './debug'
 import { actor } from './actor'
-import type { QuestionListRecord, QuestionRecord, Option, GameOverReason } from './types'
+import type { QuestionListRecord, QuestionRecord, Option, GameOverReason, ThemeRecord } from './types'
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const url = `/api${path}`
@@ -28,7 +28,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
   try {
     const res = await fetch(url, opts)
-    response = await res.json()
+    // 204 No Content (e.g. DELETE) has no body to parse.
+    response = res.status === 204 ? null : await res.json()
     if (!res.ok) {
       error = `HTTP ${res.status}`
       addHttpLog({ id, ts: new Date().toISOString(), method, url, body, response, error, durationMs: Date.now() - t0 })
@@ -42,6 +43,10 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
   addHttpLog({ id, ts: new Date().toISOString(), method, url, body, response, durationMs: Date.now() - t0 })
   return response as T
+}
+
+function themesPath(listId?: string): string {
+  return listId ? `/question-lists/${listId}/themes` : '/themes'
 }
 
 export const api = {
@@ -62,15 +67,44 @@ export const api = {
   getQuestionList: (id: string) =>
     call<QuestionListRecord>('GET', `/question-lists/${id}`),
 
-  listQuestions: (listId: string) =>
-    call<QuestionRecord[]>('GET', `/question-lists/${listId}/questions`),
+  // themeFilter: a theme id, 'none' for questions without theme, or undefined for all.
+  listQuestions: (listId: string, themeFilter?: string) =>
+    call<QuestionRecord[]>(
+      'GET',
+      `/question-lists/${listId}/questions` + (themeFilter ? `?theme_id=${encodeURIComponent(themeFilter)}` : ''),
+    ),
 
-  addQuestionToList: (listId: string, text: string, options: Option[], correctOptionId: string) =>
+  // themeId: '' for no theme.
+  addQuestionToList: (listId: string, text: string, options: Option[], correctOptionId: string, themeId = '') =>
     call<{ question_id: string }>('POST', `/question-lists/${listId}/questions`, {
       text,
       options,
       correct_option_id: correctOptionId,
+      theme_id: themeId,
     }),
+
+  // Replaces text, options, correct option and theme ('' removes the theme).
+  updateQuestion: (listId: string, questionId: string, text: string, options: Option[], correctOptionId: string, themeId = '') =>
+    call<QuestionRecord>('PUT', `/question-lists/${listId}/questions/${questionId}`, {
+      text,
+      options,
+      correct_option_id: correctOptionId,
+      theme_id: themeId,
+    }),
+
+  // ── Themes ─────────────────────────────────────────────────────────────────
+  // listId undefined: global themes (/themes). Otherwise: custom themes of that list.
+  listThemes: (listId?: string) =>
+    call<ThemeRecord[]>('GET', themesPath(listId)),
+
+  createTheme: (listId: string | undefined, name: string, description: string) =>
+    call<ThemeRecord>('POST', themesPath(listId), { name, description }),
+
+  updateTheme: (listId: string | undefined, themeId: string, name: string, description: string) =>
+    call<ThemeRecord>('PUT', `${themesPath(listId)}/${themeId}`, { name, description }),
+
+  deleteTheme: (listId: string | undefined, themeId: string) =>
+    call<null>('DELETE', `${themesPath(listId)}/${themeId}`),
 
   // ── Games ──────────────────────────────────────────────────────────────────
   createGame: (

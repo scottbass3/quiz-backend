@@ -4,6 +4,7 @@ import ActorBar from './components/ActorBar.vue'
 import HealthPanel from './components/HealthPanel.vue'
 import QuestionListsPanel from './components/QuestionListsPanel.vue'
 import GamePanel from './components/GamePanel.vue'
+import ThemesPanel from './components/ThemesPanel.vue'
 import PlayerCard from './components/PlayerCard.vue'
 import DebugPanel from './components/DebugPanel.vue'
 import type { QuestionListRecord } from './types'
@@ -12,7 +13,7 @@ interface Slot { id: string }
 
 const gameId = ref('')
 const selectedList = ref<QuestionListRecord | null>(null)
-const sidebarTab = ref<'lists' | 'game'>('lists')
+const sidebarTab = ref<'lists' | 'themes' | 'game'>('lists')
 
 const slots = reactive<Slot[]>([
   { id: crypto.randomUUID() },
@@ -38,6 +39,10 @@ function onGameIdChange(id: string) {
 }
 
 function onListSelected(list: QuestionListRecord) {
+  selectedList.value = list
+}
+
+function onUseInGame(list: QuestionListRecord) {
   selectedList.value = list
   sidebarTab.value = 'game'
 }
@@ -76,6 +81,11 @@ function onListSelected(list: QuestionListRecord) {
           >Lists</button>
           <button
             class="tab-btn"
+            :class="{ active: sidebarTab === 'themes' }"
+            @click="sidebarTab = 'themes'"
+          >Themes</button>
+          <button
+            class="tab-btn"
             :class="{ active: sidebarTab === 'game' }"
             @click="sidebarTab = 'game'"
           >
@@ -87,7 +97,16 @@ function onListSelected(list: QuestionListRecord) {
         <QuestionListsPanel
           v-show="sidebarTab === 'lists'"
           @list-selected="onListSelected"
+          @use-in-game="onUseInGame"
         />
+
+        <div v-show="sidebarTab === 'themes'" class="panel">
+          <h2>Themes</h2>
+          <ThemesPanel />
+          <div class="muted" style="font-size:11px; margin-top:6px">
+            Custom themes of a list are managed from the Lists tab, below the selected list.
+          </div>
+        </div>
 
         <GamePanel
           v-show="sidebarTab === 'game'"
