@@ -19,7 +19,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
+    # Game state lives in Redis: the append-only file keeps running games
+    # across a Redis restart (fsync every second).
+    command: redis-server --appendonly yes --appendfsync everysec --save 60 1 --loglevel warning
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -30,7 +32,7 @@ services:
       timeout: 3s
       retries: 10
 
-  api:
+  api: &api
     build:
       context: .
       dockerfile: Dockerfile.dev
@@ -66,6 +68,19 @@ services:
       - .:/app
       - go_mod_cache:/go/pkg/mod
     working_dir: /app
+
+  # A second API instance sharing Postgres and Redis, to try multi-instance
+  # setups: `make up-multi`. It runs without hot reload, since two air builds
+  # would write the same binary in the mounted source tree.
+  api2:
+    <<: *api
+    profiles: ["multi"]
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "${HTTP_PORT_2:-8081}:8080"
+    command: ["go", "run", "-buildvcs=false", "./cmd/api"]
 
   ui:
     image: node:22-alpine

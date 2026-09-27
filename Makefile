@@ -1,12 +1,16 @@
-.PHONY: up down logs ui-logs test fmt lint migrate-up build load-test load-test-game load-test-room shell
+.PHONY: up up-multi down logs ui-logs test fmt lint migrate-up build load-test load-test-game load-test-room load-test-multi shell
 
 # ── Docker Compose ──────────────────────────────────────────────────────────
 
 up:
 	docker compose up --build -d
 
+# Same stack plus a second API instance (api2, port HTTP_PORT_2, default 8081).
+up-multi:
+	docker compose --profile multi up --build -d
+
 down:
-	docker compose down
+	docker compose --profile multi down
 
 logs:
 	docker compose logs -f api
@@ -66,6 +70,11 @@ load-test-room:
 		-e ANSWER_MIN_MS=$(ANSWER_MIN_MS) \
 		-e ANSWER_MAX_MS=$(ANSWER_MAX_MS) \
 		-e CLOSE_DELAY_MS=$(CLOSE_DELAY_MS)
+
+# One game spread over api and api2 (start them with `make up-multi`).
+HTTP_PORT_2 ?= 8081
+load-test-multi:
+	k6 run k6/multi_instance.js 		-e BASE_URLS=http://localhost:$(HTTP_PORT),http://localhost:$(HTTP_PORT_2) 		-e WS_URLS=ws://localhost:$(HTTP_PORT),ws://localhost:$(HTTP_PORT_2)
 
 load-test: load-test-game load-test-room
 
