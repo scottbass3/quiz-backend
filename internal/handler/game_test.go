@@ -97,9 +97,11 @@ func (nopBroadcaster) BroadcastTo(string, domain.Event) {}
 
 type fakeSessions struct{}
 
-func (fakeSessions) Broadcaster(string) game.Broadcaster { return nopBroadcaster{} }
-func (fakeSessions) Acquire(string) (*appws.Hub, error)  { return nil, errors.New("no hub") }
-func (fakeSessions) Release(string)                      {}
+func (fakeSessions) Acquire(string) (*appws.Hub, error) { return nil, errors.New("no hub") }
+func (fakeSessions) Release(string)                     {}
+func (fakeSessions) ClaimConnection(context.Context, string, string) (int64, error) {
+	return 0, errors.New("no redis")
+}
 
 // recordingStore records the persistence calls made for a game.
 type recordingStore struct {

@@ -15,13 +15,25 @@ import (
 type LocalForwarder interface {
 	Broadcast(event domain.Event)
 	BroadcastTo(playerID string, event domain.Event)
+	// Claim closes the local connection of playerID if it is older than seq.
+	Claim(playerID string, seq int64)
 }
 
-// pubsubMsg is the envelope published on the Redis channel.
+// pubsubMsg is the envelope published on the Redis channel: either an event
+// for players, or a connection claim for the instances.
 type pubsubMsg struct {
 	Target string       `json:"t"` // "*" = all players, anything else = specific playerID
 	Event  domain.Event `json:"e"`
+	Claim  *claimMsg    `json:"c,omitempty"`
 }
+
+// claimMsg announces generation Seq of PlayerID's WebSocket connection.
+type claimMsg struct {
+	PlayerID string `json:"p"`
+	Seq      int64  `json:"s"`
+}
+
+func connectionsKey(gameID string) string { return "game:{" + gameID + "}:conns" }
 
 func channel(gameID string) string {
 	return "game:" + gameID + ":events"
@@ -37,6 +49,33 @@ type Publisher struct {
 
 func NewPublisher(rdb *redis.Client, logger *slog.Logger) *Publisher {
 	return &Publisher{rdb: rdb, logger: logger}
+}
+
+// ClaimConnection gives a new WebSocket connection of playerID its
+// generation (a per-player counter in Redis) and announces it to every
+// instance subscribed to the game, which then close any older connection of
+// that player. A player therefore has one live connection across all
+// instances, whichever instance a load balancer picks. ttl bounds the life of
+// the counter.
+func (p *Publisher) ClaimConnection(ctx context.Context, gameID, playerID string, ttl time.Duration) (int64, error) {
+	key := connectionsKey(gameID)
+	var seqCmd *redis.IntCmd
+	if _, err := p.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		seqCmd = pipe.HIncrBy(ctx, key, playerID, 1)
+		pipe.Expire(ctx, key, ttl)
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	seq := seqCmd.Val()
+	data, err := json.Marshal(pubsubMsg{Claim: &claimMsg{PlayerID: playerID, Seq: seq}})
+	if err != nil {
+		return 0, err
+	}
+	if err := p.rdb.Publish(ctx, channel(gameID), data).Err(); err != nil {
+		return 0, err
+	}
+	return seq, nil
 }
 
 // For returns a broadcaster (game.Broadcaster) for one game.
@@ -102,9 +141,12 @@ func Subscribe(rdb *redis.Client, gameID string, fwd LocalForwarder, logger *slo
 					logger.Warn("redis subscriber: unmarshal", "error", err, "payload", msg.Payload)
 					continue
 				}
-				if m.Target == "*" {
+				switch {
+				case m.Claim != nil:
+					fwd.Claim(m.Claim.PlayerID, m.Claim.Seq)
+				case m.Target == "*":
 					fwd.Broadcast(m.Event)
-				} else {
+				default:
 					fwd.BroadcastTo(m.Target, m.Event)
 				}
 			case <-ctx.Done():

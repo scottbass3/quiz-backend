@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,13 +18,21 @@ import (
 	appws "github.com/scottbass3/quizz-backend/internal/ws"
 )
 
-// hubSessions serves one real hub for every game, as both the engine's
-// broadcaster and the WebSocket hub (no Redis in between).
+// hubSessions serves one real hub for every game (no Redis in between).
 type hubSessions struct{ hub *appws.Hub }
 
-func (s hubSessions) Broadcaster(string) game.Broadcaster { return s.hub }
-func (s hubSessions) Acquire(string) (*appws.Hub, error)  { return s.hub, nil }
-func (s hubSessions) Release(string)                      {}
+func (s hubSessions) Acquire(string) (*appws.Hub, error) { return s.hub, nil }
+func (s hubSessions) Release(string)                     {}
+
+// ClaimConnection numbers connections like the Redis counter does and, like
+// the Redis claim message, tells the (only) hub about the new generation.
+func (s hubSessions) ClaimConnection(_ context.Context, _, playerID string) (int64, error) {
+	seq := connSeq.Add(1)
+	s.hub.Claim(playerID, seq)
+	return seq, nil
+}
+
+var connSeq atomic.Int64
 
 // dialPlayer opens a WebSocket as playerID and consumes the game_joined handshake.
 func dialPlayer(t *testing.T, srv *httptest.Server, playerID string) *websocket.Conn {

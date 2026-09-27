@@ -44,6 +44,9 @@ type gameSessionRegistry interface {
 	// each successful call must be paired with Release.
 	Acquire(gameID string) (*appws.Hub, error)
 	Release(gameID string)
+	// ClaimConnection returns the generation of a new connection of playerID
+	// and makes every instance close that player's older connections.
+	ClaimConnection(ctx context.Context, gameID, playerID string) (int64, error)
 }
 
 type GameHandler struct {
@@ -536,14 +539,25 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.sessions.Release(gameID)
 
+	// One connection per player across all instances: this connection gets
+	// the next generation, and older ones are closed wherever they are.
+	seq, err := h.sessions.ClaimConnection(r.Context(), gameID, playerID)
+	if err != nil {
+		h.logger.Error("ws: claim connection", "error", err, "game_id", gameID)
+		writeError(w, http.StatusServiceUnavailable, "event stream unavailable")
+		return
+	}
+
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("ws upgrade", "error", err)
 		return
 	}
 
-	client := appws.NewClient(conn, playerID, gameID, h.logger)
-	hub.Register(playerID, client)
+	client := appws.NewClient(conn, playerID, gameID, seq, h.logger)
+	if !hub.Register(playerID, client) {
+		return // a newer connection of this player already exists
+	}
 	defer hub.Unregister(playerID, client)
 
 	// Notify the player they have joined. This goes straight to the local hub

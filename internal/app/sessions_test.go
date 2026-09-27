@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	appredis "github.com/scottbass3/quizz-backend/internal/redis"
@@ -11,7 +12,7 @@ import (
 
 func TestGameSessionStore_RefCounting(t *testing.T) {
 	mr := miniredis.RunT(t)
-	s := newGameSessionStore(appredis.New(mr.Addr(), ""), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := newGameSessionStore(appredis.New(mr.Addr(), ""), time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	h1, err := s.Acquire("g1")
 	if err != nil {

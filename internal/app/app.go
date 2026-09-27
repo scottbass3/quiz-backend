@@ -40,16 +40,24 @@ type gameSessionStore struct {
 	sessions map[string]*gameSession
 	rdb      *appredis.Client
 	pub      *appredis.Publisher
+	claimTTL time.Duration // life of the per-player connection counters
 	logger   *slog.Logger
 }
 
-func newGameSessionStore(rdb *appredis.Client, logger *slog.Logger) *gameSessionStore {
+func newGameSessionStore(rdb *appredis.Client, claimTTL time.Duration, logger *slog.Logger) *gameSessionStore {
 	return &gameSessionStore{
 		sessions: make(map[string]*gameSession),
 		rdb:      rdb,
 		pub:      appredis.NewPublisher(rdb.Unwrap(), logger),
+		claimTTL: claimTTL,
 		logger:   logger,
 	}
+}
+
+// ClaimConnection gives a new WebSocket connection its generation and makes
+// every instance close older connections of the same player.
+func (s *gameSessionStore) ClaimConnection(ctx context.Context, gameID, playerID string) (int64, error) {
+	return s.pub.ClaimConnection(ctx, gameID, playerID, s.claimTTL)
 }
 
 // Broadcaster returns the publisher of a game's events (used by the engine).
@@ -162,7 +170,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	logger.Info("redis connected", "addr", cfg.RedisAddr)
 
 	// Game session store: manages hub + Redis pub/sub broadcaster per game.
-	sessions := newGameSessionStore(rdb, logger)
+	sessions := newGameSessionStore(rdb, cfg.GameIdleTTL, logger)
 	a.sessions = sessions
 
 	// Game layer: default config; individual games may override it via POST /games.

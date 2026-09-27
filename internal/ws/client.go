@@ -37,15 +37,20 @@ type Client struct {
 	buf      chan []byte
 	playerID string
 	gameID   string
+	seq      int64 // connection generation of this player; the highest one wins
 	logger   *slog.Logger
 }
 
-func NewClient(conn *websocket.Conn, playerID, gameID string, logger *slog.Logger) *Client {
+// NewClient wraps a connection of playerID. seq is the connection's
+// generation for that player (see Hub.Claim): a newer connection, on any
+// backend instance, replaces an older one.
+func NewClient(conn *websocket.Conn, playerID, gameID string, seq int64, logger *slog.Logger) *Client {
 	return &Client{
 		conn:     conn,
 		buf:      make(chan []byte, 256),
 		playerID: playerID,
 		gameID:   gameID,
+		seq:      seq,
 		logger:   logger,
 	}
 }

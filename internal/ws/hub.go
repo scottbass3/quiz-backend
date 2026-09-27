@@ -13,20 +13,35 @@ import (
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[string]*Client // playerID → client
-	logger  *slog.Logger
+	// latest is the highest connection generation announced per player (by
+	// Register or Claim). A claim can arrive before the connection it
+	// supersedes is registered: remembering it lets Register refuse that
+	// older connection.
+	latest map[string]int64
+	logger *slog.Logger
 }
 
 func NewHub(logger *slog.Logger) *Hub {
 	return &Hub{
 		clients: make(map[string]*Client),
+		latest:  make(map[string]int64),
 		logger:  logger,
 	}
 }
 
 // Register makes c the connection of playerID. A player has at most one
-// connection: when they reconnect, the previous connection is closed.
-func (h *Hub) Register(playerID string, c *Client) {
+// connection: the one with the highest generation (Client.seq). Registering
+// a newer connection closes the previous one; registering an older one (it
+// lost a race with a reconnect, possibly on another instance) closes it
+// instead and returns false.
+func (h *Hub) Register(playerID string, c *Client) bool {
 	h.mu.Lock()
+	if c.seq < h.latest[playerID] {
+		h.mu.Unlock()
+		c.Close()
+		return false
+	}
+	h.latest[playerID] = c.seq
 	old := h.clients[playerID]
 	h.clients[playerID] = c
 	h.mu.Unlock()
@@ -34,6 +49,26 @@ func (h *Hub) Register(playerID string, c *Client) {
 	if old != nil && old != c {
 		old.Close()
 	}
+	return true
+}
+
+// Claim records that generation seq of playerID's connection now exists,
+// possibly on another backend instance: a local connection of an older
+// generation is removed and closed. Claims are idempotent and can arrive in
+// any order, so the newest connection always wins.
+func (h *Hub) Claim(playerID string, seq int64) {
+	h.mu.Lock()
+	if seq > h.latest[playerID] {
+		h.latest[playerID] = seq
+	}
+	c, ok := h.clients[playerID]
+	if !ok || c.seq >= seq {
+		h.mu.Unlock()
+		return
+	}
+	delete(h.clients, playerID)
+	h.mu.Unlock()
+	c.Close()
 }
 
 // Unregister removes c if it is still the connection of playerID. A replaced
