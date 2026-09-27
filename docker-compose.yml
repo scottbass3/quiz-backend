@@ -82,6 +82,20 @@ services:
       - "${HTTP_PORT_2:-8081}:8080"
     command: ["go", "run", "-buildvcs=false", "./cmd/api"]
 
+  # Round-robin load balancer in front of api and api2 (profile "multi"),
+  # on port LB_PORT (default 8090).
+  lb:
+    image: nginx:1.27-alpine
+    profiles: ["multi"]
+    restart: unless-stopped
+    depends_on:
+      - api
+      - api2
+    ports:
+      - "${LB_PORT:-8090}:80"
+    volumes:
+      - ./tools/lb/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
   ui:
     image: node:22-alpine
     restart: unless-stopped

@@ -1,4 +1,4 @@
-.PHONY: up up-multi down logs ui-logs test fmt lint migrate-up build load-test load-test-game load-test-room load-test-multi shell
+.PHONY: up up-multi down logs ui-logs test fmt lint migrate-up build load-test load-test-game load-test-room load-test-multi lb-check shell
 
 # ── Docker Compose ──────────────────────────────────────────────────────────
 
@@ -75,6 +75,11 @@ load-test-room:
 HTTP_PORT_2 ?= 8081
 load-test-multi:
 	k6 run k6/multi_instance.js 		-e BASE_URLS=http://localhost:$(HTTP_PORT),http://localhost:$(HTTP_PORT_2) 		-e WS_URLS=ws://localhost:$(HTTP_PORT),ws://localhost:$(HTTP_PORT_2)
+
+# Reconnect one player repeatedly through the load balancer of make up-multi.
+LB_PORT ?= 8090
+lb-check:
+	LB_ADDR=localhost:$(LB_PORT) go run ./tools/lbcheck
 
 load-test: load-test-game load-test-room
 
