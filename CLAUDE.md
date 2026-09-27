@@ -6,19 +6,21 @@ Common commands are listed in the Makefile (`make test` runs `go test ./... -rac
 
 The test-ui (Vite dev server) is at **http://localhost:5173**.
 The API is at **http://localhost:8080** (overridable via `HTTP_PORT` in `.env`).
+`make up-multi` also starts a second API instance, `api2`, on **http://localhost:8081** (`HTTP_PORT_2`); `make load-test-multi` plays one game across both.
 
 ## Architecture
 
 ### Request flow
 
 ```
-HTTP/WS request
-  → chi router + auth.Middleware (internal/app/app.go, internal/auth/)
+HTTP/WS request (any instance)
+  → chi router + corsMiddleware + auth.Middleware (internal/app/, internal/auth/)
   → handler (internal/handler/game.go or question_list.go)
-  → game.Engine (internal/game/engine.go)            ← all runtime game state lives here
-  → redis.PubSubBroadcaster (internal/redis/)        ← publishes events to game:<id>:events
-  → ws.Hub (internal/ws/hub.go)                      ← fan-out to WS clients
-  → postgres.DB (internal/postgres/)                 ← persistence (best-effort, non-fatal)
+  → game.Engine (internal/game/engine.go)             ← game rules, no state of its own
+  → game.StateStore = redis.GameStateStore            ← all game state, shared by every instance
+  → redis.GamePublisher (internal/redis/broadcaster)  ← publishes events to game:<id>:events
+  → redis.Subscribe → ws.Hub (per instance)           ← fan-out to this instance's WS clients
+  → postgres.DB (internal/postgres/)                  ← history, best-effort, non-fatal
 ```
 
 ### Catalog vs runtime separation
@@ -28,69 +30,78 @@ HTTP/WS request
 - `question_list_questions` table: ordered questions per list, optional `theme_id`
 - `themes` table: `question_list_id IS NULL` is a global theme, otherwise a custom theme of that list (exposed as `scope`: `global` / `list`)
 
-**Runtime** (in-memory only):
-- `game.Engine`: holds a copy of the questions loaded from the list at game creation, plus player state and answers
-- Questions are copied from the catalog once when `POST /games` is called; the engine never reads Postgres again
-
-This means game state survives temporary DB outages, but does not survive a server restart.
+**Runtime** (in Redis):
+- A game copies the questions of its list (with the answers) into Redis when `POST /games` is called; it never reads Postgres again.
+- Game state survives Postgres outages and API restarts; Redis is persisted with its append-only file.
 
 ### Game state model
 
-Game state is **in-memory only** (`game.Engine`, one per game). The engine holds a `sync.RWMutex`. The critical rule: **events are broadcast after releasing the lock** to avoid contention with the hub. Any method that mutates state follows the pattern: lock → mutate → collect event data → unlock → broadcast.
+The `game` package holds the **rules** only. `game.Engine` is a handle on one game (ID + manager); every operation reads and writes a `game.StateStore` (`internal/game/store.go`), implemented by `redis.GameStateStore` (`internal/redis/gamestate.go`). Any instance can therefore serve any request of any game; there is no sticky routing and no in-memory registry.
 
-`Engine.Snapshot()` returns a deep copy (players, questions, answers) so callers can read it after the lock is released. Never hand out pointers into `e.game`.
+Redis layout (keys of a game share the `{id}` hash tag, so they sit in one Cluster slot):
 
-`game.Manager` is the in-memory registry of all active engines.
+| Key                         | Type   | Content                                                    |
+|-----------------------------|--------|------------------------------------------------------------|
+| `game:{id}:meta`            | hash   | status, owner, config, `current_q_idx`, `question_open`, `question_start`, `end_reason` |
+| `game:{id}:questions`       | hash   | index → question JSON (with the correct answer)            |
+| `game:{id}:players`         | hash   | player ID → JSON (name, lives, active, actor)              |
+| `game:{id}:answers:<idx>`   | hash   | player ID → option ID                                      |
+| `game:{id}:lock`            | string | per-game lock token                                        |
+| `actor:{actor}:games`       | zset   | game IDs of an actor, by creation time (`GET /games`)      |
+| `games:deadlines`           | zset   | `gameID|idx` by answer deadline (ms)                       |
 
-Game rules: a wrong or missing answer costs one life, 0 lives means eliminated. `CloseQuestion` ends the game and sets `Game.EndReason` / `CloseQuestionResult.Reason` (`domain.GameOverReason`):
+Concurrency rules (keep them when touching the engine or the store):
+- **Transitions** (join, start, close) run under `StateStore.Lock` (`SET NX PX`, 10s expiry, `ErrBusy` → HTTP 503 `game_busy` after 5s of waiting). `Engine.locked` loads the state under the lock.
+- **Answers** never take the lock: `RecordAnswer` is a Lua script that checks `status`, `question_open` and `current_q_idx` then `HSETNX`es the answer.
+- **Close** calls `CloseAnswers`, a Lua script that flips `question_open` to 0 and returns the answers in one step, so an answer is either counted or rejected (`no_active_question`), never lost after being accepted.
+- **Events are broadcast after the transition is stored and the lock is released.**
+- Every write refreshes TTLs: `GAME_IDLE_TTL` while unfinished, `GAME_FINISHED_TTL` once finished (answers keys included). Expiry replaces any sweeper; `ErrGameNotFound` means "unknown or expired".
+
+`game.State` (`internal/game/state.go`) is the loaded view: players, config, progress, the current question and its answers. Its methods (`HostActorID`, `PlayerActorID`, `ActorView`, `Scoreboard`, `CurrentQuestion`, `RemainingQuestions`) are pure; handlers load the state once per request.
+
+Game rules: a wrong or missing answer costs one life, 0 lives means eliminated (`applyPenalties`). The game ends and sets `State.EndReason` / `CloseQuestionResult.Reason` (`domain.GameOverReason`):
 - `last_player_standing`: one active player left, they win
 - `all_eliminated`: nobody left, no winner
 - `no_more_questions`: last question played with 2+ survivors; the survivor with the most lives wins, a tie is a draw (empty winner). This draw rule is intended, keep it.
 
-Question lifecycle: `Game.QuestionOpen` is set by `StartNextQuestion` and cleared on close. Start requires no open question (`ErrQuestionOpen`), close and answers require one (`ErrNoActiveQuestion`). This is what prevents a question from being closed twice.
+Question lifecycle: `question_open` is set by `StartNextQuestion` and cleared on close. Start requires no open question (`ErrQuestionOpen`), close and answers require one (`ErrNoActiveQuestion`).
 
-Per-game config: `POST /games` may set `initial_lives` and `answer_timeout_seconds`, passed to `Manager.Create` as the engine's `EngineConfig` (`Engine.Config()`); `GameHandler.cfg` only holds the defaults. With a timeout, `StartNextQuestion` arms a `time.AfterFunc` under the lock that calls `closeQuestion(idx)`; that function checks and closes under one lock and refuses any other question, and every close stops the timer.
+Per-game config: `POST /games` may set `initial_lives` and `answer_timeout_seconds`, stored in the game's meta (`State.Config`); `GameHandler.cfg` only holds the defaults.
 
-Persistence of a close lives in `GameHandler.persistClose`, registered with `Engine.OnQuestionClosed` at game creation, so manual and timeout closes are both persisted. Do not persist close results in the HTTP handler.
+**Answer deadlines:** with a timeout, `StartNextQuestion` adds `gameID|idx` to `games:deadlines`. Every instance runs `Manager.RunDeadlines` (every 250 ms), which calls `CloseDue`: a Lua script claims the due entries (range + remove in one step, so each deadline goes to one instance), then `closeQuestion(ctx, idx)` closes only if `idx` is still the open question. A manual close removes the deadline. Tests call `CloseDue(ctx, someTime)` directly instead of sleeping.
 
-What a client receives about the open question is built in one place, `Engine.questionPayloadLocked` (never the answer): `question_started`, `Engine.CurrentQuestion` (adds `answered_by`, used by `GET /games/{id}` and `game_joined`). `closes_at` is `QuestionStart` + timeout. `question_closed` and the close response carry the scoreboard (`Engine.scoreboardLocked`, sorted by name), also used for `GET /games/{id}` players. `AddPlayer` broadcasts `player_joined`.
+Persistence of a close lives in `GameHandler.persistClose`, registered with `Manager.OnQuestionClosed` by `NewGameHandler`, so closes by the host and by deadlines (on any instance) are persisted. Do not persist close results in the HTTP handler.
+
+What a client receives about the open question is built in one place, `State.questionPayload` (never the answer): `question_started`, and `State.CurrentQuestion` (adds `answered_by`, used by `GET /games/{id}` and `game_joined`). `closes_at` is `QuestionStart` + timeout. `question_closed` and the close response carry the scoreboard (`State.Scoreboard`, sorted by name), also used for `GET /games/{id}` players. `AddPlayer` broadcasts `player_joined`.
 
 `SubmitAnswer` rejects unknown option IDs (`ErrInvalidOption`, the player may answer again). The WS message handler reports every rejected answer to that player only with `answer_rejected` and a code (`answerRejectCode`), through the local hub.
 
-Clients must be told explicitly when questions run out: `question_started.is_last`, `question_closed.remaining_questions`, `game_over.reason`, and `StartNextQuestion` returns `ErrNoMoreQuestions` (HTTP 409, `code: no_more_questions`) on a game finished by `no_more_questions`. Handlers map engine errors to stable codes in `writeGameError`.
+Clients must be told explicitly when questions run out: `question_started.is_last`, `question_closed.remaining_questions`, `game_over.reason`, and `StartNextQuestion` returns `ErrNoMoreQuestions` (HTTP 409, `code: no_more_questions`) on a game finished by `no_more_questions`. Handlers map engine errors in `writeGameError` (409 codes) and `writeEngineError` (404, 503 `game_busy`, 500).
 
 ### Game access rules
 
-- Each `domain.Player` records the `ActorID` (`auth.Actor.Sub`) that created it (`AddPlayer(id, name, actorID)`).
-- The **host** is the actor that owns the game's owner player (`Engine.HostActorID()`). Only the host can `POST /games/{id}/start` and `/close` (403 otherwise).
-- `/ws` requires the current actor to own `playerId` (`Engine.PlayerActorID()`), 403 otherwise.
+- Each `domain.Player` records the `ActorID` (`auth.Actor.Sub`) that created it (`AddPlayer(ctx, id, name, actorID)`).
+- The **host** is the actor that owns the game's owner player (`State.HostActorID()`). Only the host can `POST /games/{id}/start` and `/close` (403 otherwise).
+- `/ws` requires the current actor to own `playerId` (`State.PlayerActorID()`), 403 otherwise.
 
-### Eviction
+### Events across instances
 
-`App.sweepGames` runs every minute and calls `Manager.Sweep`, which removes games for which `Engine.Expired` is true: finished games after `GAME_FINISHED_TTL` (default 10m), other games after `GAME_IDLE_TTL` (default 2h) without activity. For each removed game, `gameSessionStore.Remove` stops the Redis subscription and closes the WebSocket connections (`Hub.CloseAll`).
+`redis.Publisher` (`For(gameID)` returns a `game.Broadcaster`) publishes `{t: target, e: event}` on `game:<id>:events` from any instance; it holds no subscription.
 
-### Redis pub/sub broadcaster
+`app.gameSessionStore` keeps, per instance, a local `ws.Hub` and a Redis subscription (`redis.Subscribe`, which waits for Redis to confirm) for each game that has WebSocket clients **on this instance**. `Acquire` creates them on the first client, `Release` drops them with the last one (reference counted). `App.sweepSessions` closes the local connections of games that no longer exist in Redis.
 
-`redis.PubSubBroadcaster` implements `game.Broadcaster` via Redis pub/sub:
-- `Broadcast` / `BroadcastTo` → publish to channel `game:<id>:events`
-- A subscriber goroutine reads from that channel → forwards to the local `ws.Hub` → WS clients
-
-The broadcaster and hub are created per game in `app.gameSessionStore.GetOrCreate`, released by `Remove` on eviction, and all stopped during graceful shutdown.
-
-The event path could fan out across instances, but game state is still held in the memory of the instance that created the game. Running several instances therefore requires routing every request of a game (HTTP and WS) to the same instance. Do not describe the backend as horizontally scalable.
-
-**Note:** `game_joined` is sent directly via `hub.BroadcastTo` (bypassing Redis) because it is a connection handshake that must arrive immediately and synchronously before the read/write pumps start.
+**Note:** `game_joined` and `answer_rejected` are written directly to the local hub (bypassing Redis): the first is a handshake that must arrive before the pumps start, the second only concerns a connection of this instance.
 
 ### Postgres persistence
 
-Writes are best-effort (non-fatal: logged but don't abort requests):
+Writes are best-effort (non-fatal: logged but don't abort requests). Postgres is history only; game state is never read back from it.
 
 | Operation               | Persisted fields                          |
 |-------------------------|-------------------------------------------|
 | `POST /games`           | game row + owner player row               |
 | `POST /games/{id}/join` | player row                                |
 | `POST /games/{id}/start`| `games.status = 'running'`                |
-| `POST /games/{id}/close`| `players.lives` + `players.active` for every player who lost a life; `games.status = 'finished'` if game over |
+| question close (host or deadline) | `players.lives` + `players.active` for every player who lost a life; `games.status = 'finished'` if game over |
 
 The player's actor ID is not persisted.
 
@@ -106,15 +117,17 @@ Auth lives in `internal/auth/`. Two modes controlled by `OIDC_ENABLED`:
 3. `auth.Middleware` validates the `quizz_session` cookie on every protected request and sets the actor in context.
 4. `POST /auth/logout`: clears the cookie.
 
+Sessions are stateless signed JWTs, so they work on every instance as long as they share `SESSION_SECRET`.
+
 Role mapping: the claim named `OIDC_ROLE_CLAIM` (default: `role`) is checked; if it equals `OIDC_ADMIN_ROLE` (default: `admin`), the actor gets `ActorTypeAdmin`, otherwise `ActorTypeUser`. Both scalar string and string array claim values are handled.
 
 All routes except `/health`, `/auth/login`, `/auth/callback`, and `/auth/logout` are protected by `auth.Middleware`. `corsMiddleware` (`internal/app/cors.go`) runs before it so preflights, which carry no cookie, are answered; it is a no-op when `CORS_ALLOWED_ORIGINS` is empty.
 
-`GET /games` lists the in-memory games where the caller is host or owns a player; `GET /games/{id}` adds `me` (`Engine.ActorView`). Both let a client recover its player after losing local state.
+`GET /games` lists the games where the caller is host or owns a player (from the `actor:{id}:games` index); `GET /games/{id}` adds `me` (`State.ActorView`). Both let a client recover its player after losing local state.
 
 `extractActor` in `internal/handler/actor.go` reads the actor from the context set by the middleware. It is the only place handlers access identity.
 
-Docker Compose only passes the variables listed under `api.environment` in `docker-compose.yml`. A new config variable must be added there too, or it will be ignored under `make up`.
+Docker Compose only passes the variables listed under `api.environment` in `docker-compose.yml` (`api2` reuses them through a YAML anchor). A new config variable must be added there too, or it will be ignored under `make up`.
 
 ### Question lists and access rules
 
@@ -132,22 +145,27 @@ Editors can also rename and delete lists (questions and custom themes cascade; `
 
 Postgres errors are translated by `mapError` into `store.ErrNotFound` / `store.ErrConflict`; handlers switch on those, never on driver errors.
 
-Handler tests use `memStore` (`internal/handler/memstore_test.go`), an in-memory store mirroring these constraints, behind a real chi router and the dev auth middleware (`catalogServer`).
-
 ### WebSocket lifecycle
 
-Each game has one `ws.Hub` (held in `app.gameSessionStore`). When a player connects to `/ws?gameId=&playerId=`:
-1. The upgrader checks the `Origin` against `CORS_ALLOWED_ORIGINS` when it is set (`GameHandler.RestrictOrigins`), then the handler looks up the engine and checks that the player exists and belongs to the current actor.
-2. A `ws.Client` is created (buffered send channel, 256 msgs) and registered in the hub. One connection per player: `Hub.Register` closes the connection it replaces, and `Hub.Unregister(playerID, client)` only removes that exact client, so a replaced connection shutting down never unregisters the new one.
-3. `WritePump` and `ReadPump` run in separate goroutines.
-4. `game_joined` is sent to the player immediately, with its lives and the open question (so a reconnecting player can answer).
-5. Incoming client messages (`submit_answer`) are routed back to the engine.
+When a player connects to `/ws?gameId=&playerId=` (on any instance):
+1. The upgrader checks the `Origin` against `CORS_ALLOWED_ORIGINS` when it is set (`GameHandler.RestrictOrigins`), then the handler loads the state and checks that the player exists and belongs to the current actor.
+2. `gameSessionStore.Acquire` returns this instance's hub for the game (subscribing to Redis if needed); the handler `Release`s it when the connection ends.
+3. A `ws.Client` is created (buffered send channel, 256 msgs) and registered in the hub. One connection per player per hub: `Hub.Register` closes the connection it replaces, and `Hub.Unregister(playerID, client)` only removes that exact client. (A player connected to two instances at once keeps both connections.)
+4. `WritePump` and `ReadPump` run in separate goroutines.
+5. `game_joined` is sent to the player immediately, with its lives and the open question (so a reconnecting player can answer).
+6. Incoming client messages (`submit_answer`) are routed back to the engine.
 
 ### Migrations
 
-SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Four files are concatenated: `001_initial.sql` (base tables), `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`), `003_themes.sql` (`themes` table + `theme_id` on questions) and `004_catalog_deletes.sql` (`games.question_list_id` becomes `ON DELETE SET NULL`, in a guarded `DO` block). Statements that cannot use `IF NOT EXISTS` must be wrapped in a `DO` block that checks the catalog first. `app.New()` calls `pg.RunMigrations()` on every startup, which is safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
+SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Four files are concatenated: `001_initial.sql` (base tables), `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`), `003_themes.sql` (`themes` table + `theme_id` on questions) and `004_catalog_deletes.sql` (`games.question_list_id` becomes `ON DELETE SET NULL`, in a guarded `DO` block). Statements that cannot use `IF NOT EXISTS` must be wrapped in a `DO` block that checks the catalog first. `app.New()` calls `pg.RunMigrations()` on every startup under a Postgres advisory lock, so instances starting together run them one at a time.
 
 To add a migration: create `00N_name.sql`, embed it in `migrations.go`, and append it to `SQL`.
+
+### Tests
+
+- Game and handler tests run against **miniredis** (in-process Redis with Lua support): `newCluster` / `instance()` in `internal/game/engine_test.go` (several managers over one Redis = several instances), `testManager` in `internal/handler/manager_test.go`. Use `mr.FastForward` for expiry and `Manager.CloseDue` for deadlines instead of sleeping.
+- Catalog handler tests use `memStore` (`internal/handler/memstore_test.go`), an in-memory store mirroring the Postgres constraints, behind a real chi router and the dev auth middleware (`catalogServer`).
+- There is no Postgres test database: SQL changes are checked against the Docker stack.
 
 ### Test-UI (tools/test-ui)
 
@@ -159,10 +177,10 @@ The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected a
 
 ## Key design constraints
 
-- `game.Engine` has no knowledge of transport (HTTP/WS) or storage: it takes a `Broadcaster` interface.
-- `game.Broadcaster` is the only coupling point between game logic and delivery. `redis.PubSubBroadcaster` implements it in the app; `ws.Hub` implements it too and is what the Redis subscriber forwards to.
+- `game.Engine` has no knowledge of transport (HTTP/WS) or storage technology: it uses the `game.Broadcaster` and `game.StateStore` interfaces. Redis specifics (keys, scripts, TTLs) stay in `internal/redis`.
+- `game.Broadcaster` is the only coupling point between game logic and delivery. `redis.GamePublisher` implements it in the app; `ws.Hub` implements it too and is what the Redis subscriber forwards to.
 - `store.GameStore` / `PlayerStore` / `QuestionListStore` / `ThemeStore` are interfaces; `postgres.DB` implements all four. `GameStore` and `PlayerStore` may be `nil` in handler tests.
-- `game.Engine.AddQuestion` is kept for test convenience only; HTTP no longer exposes it. Production games get their questions from the list at creation time.
+- Never keep game state in instance memory: an instance may die or another may serve the next request.
 - The `go build` in `.air.toml` uses `-buildvcs=false`, required because the container can't access git metadata.
 
 ## Documentation

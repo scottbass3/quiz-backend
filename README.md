@@ -48,14 +48,14 @@ cmd/api          entry point: loads config, wires the app, handles OS signals
 internal/
   config/        env-driven configuration
   domain/        pure data types: Game, Player, Question, QuestionList, Answer, Event
-  game/          game engine (thread-safe, in-memory) and the manager that holds all engines
+  game/          game rules (engine), game state view and the StateStore interface
   store/         repository interfaces (GameStore, PlayerStore, QuestionListStore)
   postgres/      pgx/v5 implementation of the store interfaces
-  redis/         Redis client and the pub/sub event broadcaster
+  redis/         Redis client, game state store (Lua scripts, TTLs) and event pub/sub
   ws/            per-game Hub (fan-out) and Client (read/write pumps per connection)
   auth/          auth middleware, OIDC provider, session and state JWTs
   handler/       chi HTTP handlers and the WebSocket upgrade
-  app/           wires all layers, runs the HTTP server and the game sweeper
+  app/           wires all layers, runs the HTTP server, answer deadlines and local WS sessions
 migrations/      SQL embedded in the binary, applied automatically at startup
 k6/              load test scripts
 tools/test-ui/   Vite + Vue 3 dev tool for manual testing (not production code)
@@ -67,20 +67,22 @@ tools/test-ui/   Vite + Vue 3 dev tool for manual testing (not production code)
 HTTP / WS request
   → chi router, auth middleware        (internal/app, internal/auth)
   → handler                            (internal/handler)
-  → game.Engine                        (internal/game)      all runtime game state lives here
-  → redis.PubSubBroadcaster            (internal/redis)     publishes events to game:<id>:events
-  → ws.Hub                             (internal/ws)        forwards events to connected clients
+  → game.Engine                        (internal/game)      game rules
+  → redis.GameStateStore               (internal/redis)     game state, shared by every instance
+  → redis publisher / subscriber       (internal/redis)     events on game:<id>:events
+  → ws.Hub                             (internal/ws)        forwards events to this instance's clients
   → postgres.DB                        (internal/postgres)  best-effort persistence
 ```
 
 ### Key design decisions
 
 - **Catalog vs runtime.** Question lists, their questions and themes live in Postgres. A game copies the questions of its list (with their theme) once, at creation, and never reads Postgres again for them.
-- **In-memory game state.** Each game is a `game.Engine` guarded by a `sync.RWMutex`. Events are broadcast *after* the lock is released to avoid contention with the hub.
-- **Transport-agnostic engine.** The engine only knows a `Broadcaster` interface. In the app it is backed by Redis pub/sub: the engine publishes to `game:<id>:events`, a subscriber goroutine forwards each event to the local `ws.Hub`, which writes to the WebSocket clients.
-- **One hub per game.** Each game has its own hub and Redis subscription, created with the game and released when the game is evicted.
-- **Best-effort persistence.** Postgres writes (game, players, lives, status) are logged on failure but never abort a request. Answers are not persisted.
-- **Eviction.** A sweeper runs every minute and removes finished games after `GAME_FINISHED_TTL` and unfinished games idle for `GAME_IDLE_TTL`, closing their WebSocket connections and Redis subscription.
+- **Game state in Redis, rules in Go.** The `game` package applies the rules; all game state (players, lives, current question, answers) lives in Redis behind a `StateStore` interface. Any API instance can serve any request of any game, and a game survives an API restart.
+- **Concurrency without an in-memory lock.** Join, start and close take a short per-game Redis lock. Answers skip it: a Lua script records the first answer only if the question is still open, and closing a question flips it closed and reads its answers in one atomic step, so an accepted answer is always counted.
+- **Shared answer deadlines.** Timed questions register their deadline in a Redis sorted set that every instance polls; claiming a deadline is atomic, so each question is closed once, even if the instance that started it is gone.
+- **Transport-agnostic engine.** The engine only knows a `Broadcaster` interface. Events are published on Redis (`game:<id>:events`) from any instance; each instance subscribes to a game while it has WebSocket clients of that game, and forwards the events to them.
+- **Best-effort persistence.** Postgres keeps a history of games and players (lives, status). Writes are logged on failure but never abort a request, and are never read back for gameplay.
+- **Expiry.** Game data expires in Redis: `GAME_FINISHED_TTL` after the end of a game, `GAME_IDLE_TTL` after the last activity of an unfinished one. Instances then close the WebSocket connections of expired games.
 - **Embedded migrations.** SQL files are embedded with `//go:embed` and applied on every startup. Every statement is idempotent (`IF NOT EXISTS`), so no external migration tool is needed.
 - **Libraries.** `chi` for routing, `gorilla/websocket` for WebSocket (explicit pumps with ping/pong), `pgx/v5`, `go-redis/v9`, `coreos/go-oidc` and `golang-jwt`.
 
@@ -105,6 +107,10 @@ make up                # builds and starts api, postgres, redis and the test UI
 
 The API runs with [air](https://github.com/air-verse/air) and rebuilds on every `.go` change. Migrations run automatically when the API starts.
 
+### Several instances
+
+`make up-multi` also starts `api2`, a second API instance sharing Postgres and Redis (port `HTTP_PORT_2`, default 8081). Any request of any game can go to either instance, for example behind a round-robin load balancer; `make load-test-multi` checks it with k6.
+
 ### Without Docker (API only)
 
 The API reads its configuration from the process environment only, it does not load `.env` by itself.
@@ -127,8 +133,8 @@ go run ./cmd/api
 | `REDIS_PASSWORD`     | *(empty)*                                           | Redis password                                             |
 | `LOG_LEVEL`          | `info`                                              | `debug`, `info`, `warn` or `error`                         |
 | `GAME_INITIAL_LIVES` | `3`                                                 | Lives per player                                           |
-| `GAME_FINISHED_TTL`  | `10m`                                               | How long a finished game stays in memory                   |
-| `GAME_IDLE_TTL`      | `2h`                                                | Evict unfinished games with no activity for this long      |
+| `GAME_FINISHED_TTL`  | `10m`                                               | How long a finished game stays in Redis                    |
+| `GAME_IDLE_TTL`      | `2h`                                                | Expire unfinished games with no activity for this long     |
 | `SHUTDOWN_TIMEOUT`   | `10s`                                               | Graceful shutdown window                                   |
 | `SESSION_SECRET`     | `dev-secret-change-in-production`                   | HMAC key for session and OAuth2 state JWTs                 |
 | `OIDC_ENABLED`       | `false`                                             | `true` to use OIDC instead of the debug headers            |
@@ -148,6 +154,7 @@ Durations use Go syntax (`90s`, `10m`, `2h`). Invalid values fall back to the de
 | Variable            | Default | Description                     |
 |---------------------|---------|---------------------------------|
 | `HTTP_PORT`         | `8080`  | Host port mapped to the API     |
+| `HTTP_PORT_2`       | `8081`  | Host port of `api2` (`make up-multi`) |
 | `UI_PORT`           | `5173`  | Host port mapped to the test UI |
 | `POSTGRES_USER`     | `quizz` | Postgres user                   |
 | `POSTGRES_PASSWORD` | `quizz` | Postgres password               |
@@ -281,14 +288,15 @@ Keep the same actor from step 4 to the end: start and close are host only, and e
 make test     # go test ./... -race -count=1
 ```
 
-Unit tests cover the game engine, the manager sweeper and the dev auth middleware. Handlers and the Postgres layer have no automated tests yet.
+Game and handler tests run against [miniredis](https://github.com/alicebob/miniredis), an in-process Redis, including scenarios with several instances sharing one game. There is no Postgres test database: SQL is checked against the Docker stack.
 
 Load tests use k6 against a running stack (`make up`). `BASE_URL` and `WS_URL` default to `localhost:$(HTTP_PORT)`.
 
 ```bash
 make load-test-game   # 10 VUs for 2 minutes, each playing a full one-player game
 make load-test-room   # NUM_PLAYERS players (default 50) in a single game
-make load-test        # both
+make load-test-multi  # one game spread over api and api2 (needs make up-multi)
+make load-test        # game and room
 ```
 
 `load-test-room` also accepts `ANSWER_MIN_MS`, `ANSWER_MAX_MS` and `CLOSE_DELAY_MS`, for example `make load-test-room NUM_PLAYERS=200`.
@@ -297,6 +305,7 @@ make load-test        # both
 
 ```bash
 make up           # start api, postgres, redis and the test UI
+make up-multi     # same, plus a second API instance (api2) on port 8081
 make down         # stop all services
 make logs         # tail API logs
 make ui-logs      # tail test UI logs
@@ -310,7 +319,7 @@ make migrate-up   # restart the API, which re-applies migrations
 
 ## Known limitations
 
-- **Game state does not survive a restart.** Games live in memory only; Postgres keeps a record of games and players but is never read back.
-- **Single instance per game.** Events go through Redis pub/sub, but a game's state lives in the memory of the instance that created it. Running several API instances requires routing every request of a game (HTTP and WebSocket) to the same instance.
+- **Redis is required to play.** It holds every running game. It is persisted with its append-only file (fsync every second): a Redis crash can lose up to a second of game activity.
+- **Duplicate connections across instances.** A player has one WebSocket per instance. If a client reconnects through another instance while its old connection is still open, both receive the events until the old one closes.
 - **Development defaults.** The session cookie is not marked `Secure`, `SESSION_SECRET` has a public default, and without `CORS_ALLOWED_ORIGINS` the WebSocket upgrader accepts any origin. Review all three before a public deployment.
 - **Same-site only in OIDC mode.** The session cookie is `SameSite=Lax`: a UI on another site than the API cannot use it, even with CORS.

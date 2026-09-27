@@ -35,7 +35,7 @@ Both types can create, join and play games.
 ### Catalog vs game
 
 - The **catalog** is persistent: question lists, their questions and themes. It is managed with plain REST endpoints.
-- A **game** is created from a question list. Its questions are **copied** at creation: editing or deleting the list afterwards does not affect running games. Games live in the server's memory only (see [limitations](#11-limitations)).
+- A **game** is created from a question list. Its questions are **copied** at creation: editing or deleting the list afterwards does not affect running games. Games are kept in Redis for a limited time (see [running a game](#6-show-results)).
 
 ### Roles inside a game
 
@@ -464,7 +464,7 @@ GET /games
 } ]
 ```
 
-Lists the games in memory where the caller is the host or owns a player, newest first. Use it for a "resume your game" screen, or to recover after the client lost its stored IDs. It does not list other people's games: there is no public game discovery.
+Lists the existing games where the caller is the host or owns a player, newest first. Use it for a "resume your game" screen, or to recover after the client lost its stored IDs. It does not list other people's games: there is no public game discovery.
 
 ## 7. WebSocket protocol
 
@@ -480,11 +480,11 @@ const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${l
 
 With option B (CORS), use the API's host instead of `location.host`.
 
-The actor (session cookie, or debug parameters) must be the one that created `playerId`. The handshake fails with `400` (missing parameter), `401` (OIDC mode, no valid session), `403` (player not in this game, owned by another actor, or origin not allowed) or `404` (unknown or evicted game). **Browsers do not expose the handshake status**: you only get an `error` then a `close` event with code `1006`. To tell the causes apart, call `GET /games/{id}` before connecting and check that your player is in `me.player_ids`.
+The actor (session cookie, or debug parameters) must be the one that created `playerId`. The handshake fails with `400` (missing parameter), `401` (OIDC mode, no valid session), `403` (player not in this game, owned by another actor, or origin not allowed) `404` (unknown or expired game) or `503` (the instance could not subscribe to the game's events; retry). **Browsers do not expose the handshake status**: you only get an `error` then a `close` event with code `1006`. To tell the causes apart, call `GET /games/{id}` before connecting and check that your player is in `me.player_ids`.
 
 The server pings every 54 seconds and drops the connection if no pong comes back within 60 seconds. Browsers answer pings automatically; you have nothing to do. Client messages are limited to 4 KB.
 
-**One connection per player.** Opening a second WebSocket for the same player (new tab, page reload) closes the previous one. The newest connection receives the events.
+**One connection per player.** Opening a second WebSocket for the same player (new tab, page reload) through the same backend instance closes the previous one. Behind a load balancer the new connection may land on another instance: close the old socket yourself before reconnecting, otherwise both receive the events until the old one drops.
 
 ### Server messages
 
@@ -585,16 +585,16 @@ Persist per game (for example in `sessionStorage`, keyed by `game_id`) the `game
 
 ### After a page reload or a network drop
 
-1. `GET /games/{id}`. On `404`, the game is gone (evicted, or the server restarted): go back to the home screen.
+1. `GET /games/{id}`. On `404`, the game is gone (expired): go back to the home screen.
 2. Pick your player from `me.player_ids` (and `me.is_host` for the host screen).
 3. Reopen the WebSocket with that player. It replaces any previous connection.
 4. Rebuild the screen from `game_joined` (or the `GET` response): `status`, `lives`, `active`, and `current_question` if a question is open. Check `current_question.answered_by` to know whether your player already answered.
 
 Reconnect with a backoff (for example 1 s, 2 s, 5 s, then every 10 s) when the socket closes while the game is not finished.
 
-### Server restarts
+### Server restarts and several instances
 
-Games are kept in memory only. A backend restart ends every game: all game endpoints then answer `404` for the old IDs. The catalog is not affected.
+Game state lives in Redis, shared by every backend instance. Requests of one game can go to any instance, and an instance restart does not end games: clients just reconnect their WebSocket (to the same or another instance) and carry on. Deadlines of timed questions are honored even if the instance that started the question is gone.
 
 ## 9. Error reference
 
@@ -622,7 +622,8 @@ Errors without code, by status:
 | 400    | invalid JSON, missing or invalid field (the `error` message says which)                   |
 | 401    | OIDC mode: no session or expired session; redirect to `/auth/login`                       |
 | 403    | not allowed: wrong actor type, not the list owner, not the host, not the player's actor   |
-| 404    | unknown or invisible resource, evicted game                                               |
+| 404    | unknown or invisible resource, expired game                                               |
+| 503    | `code: game_busy`: the game was locked by concurrent transitions for too long; retry     |
 | 409    | `POST /games/{id}/join` on a game that already started                                    |
 | 500    | unexpected server error; retry later                                                      |
 
@@ -812,10 +813,10 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
 
 | Limitation                                          | Consequence for a UI                                                          |
 |-----------------------------------------------------|-------------------------------------------------------------------------------|
-| Games are kept in memory only                       | a backend restart ends every game: handle `404` by returning home             |
+| Games expire (10 min after the end, 2 h idle)       | handle `404` on game endpoints by returning home                              |
 | No public game discovery                            | share `game_id` out of band (link, QR code); `GET /games` only lists yours    |
 | Cross-site cookies are not supported                | in OIDC mode, the UI and the API must be on the same site (see section 2)     |
-| One game state per backend instance                 | behind several instances, route every request of a game to the same one       |
+| A player may hold one WebSocket per instance        | close the old socket before reconnecting, to avoid duplicate events           |
 
 ## 12. Integration checklist
 
