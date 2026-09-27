@@ -137,3 +137,21 @@ func TestUpdateQuestion(t *testing.T) {
 		}
 	}
 }
+
+func TestListQuestions_HidesAnswersFromReaders(t *testing.T) {
+	srv := catalogServer(t, newMemStore())
+	var list store.QuestionListRecord
+	call(t, srv, admin, "POST", "/question-lists", `{"name":"Public","visibility":"public"}`, &list)
+	call(t, srv, admin, "POST", "/question-lists/"+list.ID+"/questions", questionBody(""), nil)
+
+	var raw []map[string]any
+	call(t, srv, admin, "GET", "/question-lists/"+list.ID+"/questions", "", &raw)
+	if raw[0]["correct_option_id"] != "b" {
+		t.Fatalf("editor should see the answer, got %v", raw[0])
+	}
+	var asReader []map[string]any // fresh: decoding into raw would merge keys
+	call(t, srv, bob, "GET", "/question-lists/"+list.ID+"/questions", "", &asReader)
+	if _, ok := asReader[0]["correct_option_id"]; ok {
+		t.Fatalf("reader must not see the answer, got %v", asReader[0])
+	}
+}

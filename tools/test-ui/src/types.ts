@@ -77,7 +77,7 @@ export interface QuestionRecord {
   question_list_id: string
   text: string
   options: Option[]
-  correct_option_id: string
+  correct_option_id?: string // only sent to actors who can edit the list
   order_index: number
   theme: ThemeRef | null
 }

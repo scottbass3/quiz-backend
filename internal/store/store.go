@@ -47,12 +47,13 @@ type QuestionListRecord struct {
 
 // QuestionRecord is the persistence model for a catalog question (belongs to a question list).
 type QuestionRecord struct {
-	ID              string         `json:"id"`
-	QuestionListID  string         `json:"question_list_id"`
-	Text            string         `json:"text"`
-	Options         []OptionRecord `json:"options"`
-	CorrectOptionID string         `json:"correct_option_id"`
-	OrderIndex      int            `json:"order_index"`
+	ID             string         `json:"id"`
+	QuestionListID string         `json:"question_list_id"`
+	Text           string         `json:"text"`
+	Options        []OptionRecord `json:"options"`
+	// CorrectOptionID is omitted from API responses to actors who cannot edit the list.
+	CorrectOptionID string `json:"correct_option_id,omitempty"`
+	OrderIndex      int    `json:"order_index"`
 
 	// ThemeID is the optional theme (global, or custom to the same list); empty
 	// means no theme. Theme is its short form, filled on reads (null if none).

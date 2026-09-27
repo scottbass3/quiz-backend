@@ -154,11 +154,17 @@ func (h *QuestionListHandler) ListQuestions(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Optional filter: ?theme_id=<id>, or ?theme_id=none for unthemed questions.
+	// The correct answer is only shown to actors who can edit the list, so
+	// players cannot read the answers of a public list before a game.
 	out := []store.QuestionRecord{}
 	themeFilter, filtered := r.URL.Query()["theme_id"]
+	editor := canEditList(a, list)
 	for _, q := range questions {
 		if filtered && !matchesTheme(q, themeFilter[0]) {
 			continue
+		}
+		if !editor {
+			q.CorrectOptionID = ""
 		}
 		out = append(out, q)
 	}

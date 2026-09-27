@@ -135,7 +135,7 @@ function startEdit(q: QuestionRecord) {
   for (let i = q.options.length; i < qOptions.length; i++) {
     qOptions[i].id = free.shift() ?? `opt${i + 1}`
   }
-  qCorrect.value = q.correct_option_id
+  qCorrect.value = q.correct_option_id ?? qOptions[0].id
   qTheme.value = q.theme?.id ?? ''
   qMsg.value = q.options.length > qOptions.length
     ? `only the first ${qOptions.length} options can be edited here`
@@ -277,11 +277,12 @@ onMounted(loadGlobalThemes)
               <span class="muted" style="font-size:10px">#{{ q.order_index + 1 }}</span>
               {{ q.text }}
               <span v-if="q.theme" class="theme-tag" :class="q.theme.scope">{{ q.theme.name }}</span>
-              <span class="muted" style="font-size:10px; margin-left:4px">
+              <span v-if="q.correct_option_id" class="muted" style="font-size:10px; margin-left:4px">
                 (correct: {{ q.options.find(o => o.id === q.correct_option_id)?.text ?? q.correct_option_id }})
               </span>
             </span>
-            <button style="padding:0 5px; font-size:10px" @click="startEdit(q)">edit</button>
+            <!-- The answer is only sent to editors, so it doubles as an edit-right hint. -->
+            <button v-if="q.correct_option_id" style="padding:0 5px; font-size:10px" @click="startEdit(q)">edit</button>
           </div>
         </div>
       </div>
