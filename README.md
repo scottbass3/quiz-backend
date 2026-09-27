@@ -13,7 +13,7 @@ Building a UI on top of this backend? Read the [frontend integration guide](docs
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
 - [Authentication](#authentication)
-- [HTTP API](#http-api) (including [themes](#themes))
+- [HTTP API](#http-api)
 - [WebSocket](#websocket)
 - [Test UI](#test-ui)
 - [Test scenarios](#test-scenarios)
@@ -139,6 +139,7 @@ go run ./cmd/api
 | `OIDC_FRONTEND_URL`  | `http://localhost:5173`                             | Where the browser is sent after a successful login         |
 | `OIDC_ROLE_CLAIM`    | `role`                                              | ID token claim holding the role (string or string array)   |
 | `OIDC_ADMIN_ROLE`    | `admin`                                             | Role value that maps to the `admin` actor type             |
+| `CORS_ALLOWED_ORIGINS` | *(empty)*                                         | Comma-separated browser origins allowed to call the API cross-origin with credentials; when set, WebSocket origins are limited to them |
 
 Durations use Go syntax (`90s`, `10m`, `2h`). Invalid values fall back to the default.
 
@@ -188,227 +189,52 @@ Register `OIDC_REDIRECT_URL` as an allowed redirect URI at your provider, and se
 
 ## HTTP API
 
-All bodies are JSON. Errors are returned as `{ "error": "..." }`. Game state errors on start and close, and the empty list error on game creation, also carry a stable `code` to switch on: `{ "error": "no more questions", "code": "no_more_questions" }`.
+This is a summary. Request and response bodies, every WebSocket payload, error codes and TypeScript types are in the [frontend integration guide](docs/frontend-integration.md), which is the reference for clients.
 
-### Health
+All bodies are JSON. Errors are `{ "error": "...", "code": "..." }`, where `code` is only set on errors clients are expected to handle.
 
-```
-GET /health
-→ 200 { "status": "ok", "uptime": "1m23s" }
-```
+| Method & path                                         | Who                     | Purpose                                              |
+|-------------------------------------------------------|-------------------------|------------------------------------------------------|
+| `GET /health`                                         | anyone                  | liveness, no auth                                    |
+| `GET /auth/login`, `GET /auth/callback`               | anyone                  | OIDC login flow (`404` in dev mode)                  |
+| `POST /auth/logout`                                   | anyone                  | clear the session cookie                             |
+| `GET /auth/me`                                        | authenticated           | current actor and `oidc_enabled`                     |
+| `POST /question-lists`                                | admin: public, user: private | create a list                                   |
+| `GET /question-lists/public`, `/private`              | everyone / users        | list lists                                           |
+| `GET /question-lists/{id}`                            | list readers            | list metadata                                        |
+| `PUT`, `DELETE /question-lists/{id}`                  | list editors            | rename, delete (with its questions and themes)       |
+| `GET /question-lists/{id}/questions[?theme_id=]`      | list readers            | questions; `correct_option_id` only for editors      |
+| `POST /question-lists/{id}/questions`                 | list editors            | add a question (optional `theme_id`)                 |
+| `PUT`, `DELETE /question-lists/{id}/questions/{qid}`  | list editors            | replace, delete a question                           |
+| `PUT /question-lists/{id}/questions/order`            | list editors            | reorder all questions                                |
+| `GET`, `POST /themes`; `GET`, `PUT`, `DELETE /themes/{tid}` | everyone reads, admins write | global themes                            |
+| `GET`, `POST /question-lists/{id}/themes`; `GET`, `PUT`, `DELETE .../themes/{tid}` | readers / editors | custom themes of a list |
+| `POST /games`                                         | authenticated           | create a game (optional `initial_lives`, `answer_timeout_seconds`); caller becomes host |
+| `GET /games`                                          | authenticated           | games where the caller is host or owns a player      |
+| `GET /games/{id}`                                     | authenticated           | full state, `current_question`, and `me`             |
+| `POST /games/{id}/join`                               | authenticated           | add a player owned by the caller                     |
+| `POST /games/{id}/start`, `/close`                    | host                    | start the next question, close the open one          |
+| `GET /ws?gameId=&playerId=`                           | the player's actor      | WebSocket                                            |
 
-### Auth
-
-| Route                | Description                                                                 |
-|----------------------|-----------------------------------------------------------------------------|
-| `GET /auth/login`    | Redirects to the OIDC provider (`404` in dev mode)                          |
-| `GET /auth/callback` | OIDC redirect target (`404` in dev mode)                                    |
-| `POST /auth/logout`  | Clears the session cookie                                                   |
-| `GET /auth/me`       | Current actor: `{ sub, name, email, actor_type, oidc_enabled }`, works in both modes |
-
-### Question lists
-
-| Visibility | Created by            | Readable by | Edited by (questions, custom themes) |
-|------------|-----------------------|-------------|--------------------------------------|
-| `public`   | `admin` actors only   | everyone    | any `admin` actor                    |
-| `private`  | `user` actors only    | its owner   | its owner                            |
-
-```
-POST /question-lists
-{ "name": "General culture", "description": "...", "visibility": "public" }
-→ 201 { "id", "name", "description", "visibility", "owner_type", "owner_id", "created_at", "updated_at" }
-  400 missing name or invalid visibility
-  403 visibility not allowed for this actor type
-```
-
-```
-GET /question-lists/public
-→ 200 [ { ...list }, ... ]
-```
-
-```
-GET /question-lists/private
-→ 200 lists owned by the current actor
-  403 actor is not a user
-```
-
-```
-GET /question-lists/{id}
-→ 200 list metadata
-  403 private list owned by someone else
-  404 unknown list
-```
-
-```
-GET /question-lists/{id}/questions[?theme_id=<id>|none]
-→ 200 [ { "id", "question_list_id", "text", "options", "correct_option_id", "order_index",
-          "theme": { "id", "name", "scope" } | null }, ... ]
-  403 private list owned by someone else
-  404 unknown list
-```
-
-Questions are ordered by `order_index`. `theme_id=<id>` keeps the questions of one theme, `theme_id=none` the questions without theme.
-
-```
-POST /question-lists/{id}/questions
-{
-  "text": "Capital of France?",
-  "options": [{"id":"a","text":"London"},{"id":"b","text":"Paris"},{"id":"c","text":"Berlin"}],
-  "correct_option_id": "b",
-  "theme_id": "..."
-}
-→ 201 { "question_id": "..." }
-  400 missing text, fewer than 2 options or missing correct_option_id
-  400 correct_option_id matches no option, or duplicate option ids
-  400 code=theme_not_found / code=theme_from_another_list
-  403 not allowed to edit this list
-```
-
-```
-PUT /question-lists/{id}/questions/{questionID}
-(same body as POST)
-→ 200 the updated question, as returned by GET .../questions
-  400 same validation as POST
-  403 not allowed to edit this list
-  404 unknown list, or question not in this list
-```
-
-Option IDs are generated when left empty. New questions are appended at the end of the list; `PUT` replaces the text, options, correct option and theme but keeps the position. `theme_id` is optional on both: omit it (or send `null` or `""`) for a question without theme, which also removes the theme on `PUT`.
-
-### Themes
-
-Themes categorize questions. They come in two scopes, returned as `scope`:
-
-| Scope    | Route                                  | Readable by              | Managed by        |
-|----------|----------------------------------------|--------------------------|-------------------|
-| `global` | `/themes`                              | everyone                 | `admin` actors    |
-| `list`   | `/question-lists/{id}/themes`          | readers of that list     | editors of that list |
-
-A question references at most one theme, which must be a global theme or a custom theme of **its own** list. Names are trimmed, required, at most 100 characters and unique per scope, ignoring case: two lists may both have a "History" theme, and so may a list and the global scope.
-
-Both routes offer the same operations:
-
-```
-GET    /themes                          GET    /question-lists/{id}/themes
-POST   /themes                          POST   /question-lists/{id}/themes
-GET    /themes/{themeID}                GET    /question-lists/{id}/themes/{themeID}
-PUT    /themes/{themeID}                PUT    /question-lists/{id}/themes/{themeID}
-DELETE /themes/{themeID}                DELETE /question-lists/{id}/themes/{themeID}
-```
-
-```
-POST / PUT body:  { "name": "Geography", "description": "optional" }
-Theme:            { "id", "scope", "question_list_id" (list scope only), "name", "description", "created_at", "updated_at" }
-
-GET list   → 200 [ ...themes ] sorted by name
-POST       → 201 theme
-GET / PUT  → 200 theme
-DELETE     → 204
-  400 missing or too long name
-  403 not allowed to read or manage this scope
-  404 unknown theme, or theme of another scope (a list theme is not reachable through /themes or another list)
-  409 code=theme_name_taken
-```
-
-Deleting a theme never fails because of questions: they are simply left without theme. Deleting a list is not supported, but would delete its custom themes.
-
-### Games
-
-```
-POST /games
-{ "owner_name": "Alice", "question_list_id": "...", "initial_lives": 3, "answer_timeout_seconds": 20 }
-→ 201 { "game_id", "owner_id", "question_list_id", "total_questions" }
-  400 missing owner_name or question_list_id
-  400 initial_lives below 1, or negative answer_timeout_seconds
-  400 code=empty_question_list: the list has no questions
-  403 private list owned by someone else
-  404 unknown list
-```
-
-The current actor becomes the host, and an owner player named `owner_name` is created for them (`owner_id` is that player's ID).
-
-`initial_lives` and `answer_timeout_seconds` are optional. Without `initial_lives` the game uses `GAME_INITIAL_LIVES`. Without `answer_timeout_seconds`, or with `0`, questions stay open until the host closes them; otherwise each question is closed automatically after that many seconds, with the same effects and events as a manual close (including persistence).
-
-```
-POST /games/{id}/join
-{ "player_name": "Bob" }
-→ 200 { "game_id", "player_id" }
-  404 unknown game
-  409 game already started
-```
-
-The player is bound to the current actor: only that actor can open a WebSocket as this player. One actor may own several players.
-
-```
-GET /games/{id}
-→ 200 { "id", "status", "owner_id", "question_list_id", "players": [{ "id", "name", "lives", "active" }],
-        "current_q_idx", "question_open", "total_questions", "remaining_questions", "end_reason" }
-  404 unknown game (or evicted)
-```
-
-`current_q_idx` is the index of the last started question (`-1` before the first). `question_open` is true while that question accepts answers. `remaining_questions` counts the questions not started yet. `end_reason` is empty until the game is finished, then holds the `game_over` reason.
-
-```
-POST /games/{id}/start        (host only)
-→ 200 { "status": "question started" }, broadcasts question_started
-  403 not the host
-  409 code=question_open: the current question must be closed first
-  409 code=no_more_questions: the last question has already been played
-  409 code=game_finished: the game ended by elimination
-```
-
-```
-POST /games/{id}/close        (host only)
-→ 200 { "life_lost": [...], "eliminated": [...], "remaining_questions": 1,
-        "game_over": false, "reason": "", "winner": "", "survivors": null }
-  403 not the host
-  409 code=game_not_running: game not started yet, or already finished
-  409 code=no_active_question: no question is open (already closed by hand or by the timeout)
-```
-
-Close broadcasts `question_closed`, then `life_lost` (privately), `player_eliminated` and `game_over` as needed. `reason`, `winner` and `survivors` are only meaningful when `game_over` is true. `remaining_questions` can be above 0 on game over when the game ended by elimination. `life_lost` and `eliminated` are `null` when empty.
+List readers: everyone for a public list, the owner for a private one. List editors: any admin for a public list, the owner for a private one. Global themes are written by admins only.
 
 ## WebSocket
 
-```
-ws://localhost:8080/ws?gameId=<game_id>&playerId=<player_id>
-```
+Connect to `/ws?gameId=<game_id>&playerId=<player_id>` as the actor that created the player (in dev mode, pass `debugActorType` / `debugActorId` as query parameters, since browsers cannot set headers on a WebSocket). One connection per player: reconnecting closes the previous connection. The server pings every 54 s.
 
-The connection is authenticated like any other request (session cookie, or debug headers / query parameters in dev mode), and the actor must be the one that created `playerId`.
+| Server event        | Sent to     | Meaning                                                     |
+|---------------------|-------------|-------------------------------------------------------------|
+| `game_joined`       | that player | handshake; includes lives and the open question, if any     |
+| `player_joined`     | everyone    | a player joined                                             |
+| `question_started`  | everyone    | question, options, theme, `is_last`, optional `closes_at`   |
+| `answer_submitted`  | everyone    | a player's answer was accepted (correctness hidden)         |
+| `answer_rejected`   | that player | the answer was refused, with a code                         |
+| `question_closed`   | everyone    | correct option, remaining questions, scoreboard             |
+| `life_lost`         | that player | lives left                                                  |
+| `player_eliminated` | everyone    | a player reached 0 lives                                    |
+| `game_over`         | everyone    | `reason`, `winner_id`, `survivors`                          |
 
-| Status | Reason                                   |
-|--------|------------------------------------------|
-| `400`  | missing `gameId` or `playerId`           |
-| `403`  | player not in the game, or owned by another actor |
-| `404`  | unknown game                             |
-
-A player has at most one connection. Reconnecting (for example after a page reload) closes the previous connection and events go to the new one.
-
-The server pings every 54s and closes the connection if no pong arrives within 60s. Messages are limited to 4 KB.
-
-### Server → client events
-
-Every event has the shape `{ "type": "...", "payload": { ... } }`.
-
-| `type`              | Sent to      | Payload                                                           |
-|---------------------|--------------|-------------------------------------------------------------------|
-| `game_joined`       | that player  | `game_id`, `player_id`, `status`, `question_list_id`, `total_questions` |
-| `question_started`  | everyone     | `question_id`, `index`, `total`, `is_last`, `text`, `options`, `theme` (`{ id, name, scope }` or `null`), `answer_timeout_seconds` (only when the game has a timeout) |
-| `answer_submitted`  | everyone     | `player_id`, `question_id` (correctness is not revealed)          |
-| `question_closed`   | everyone     | `question_id`, `correct_option_id`, `remaining_questions`         |
-| `life_lost`         | that player  | `player_id`, `lives_left`                                         |
-| `player_eliminated` | everyone     | `player_id`                                                       |
-| `game_over`         | everyone     | `reason`, `winner_id` (empty when there is no winner), `survivors` |
-
-`game_joined` is written directly to the local hub, the other events go through Redis.
-
-### Client → server messages
-
-```json
-{ "type": "submit_answer", "data": { "question_id": "...", "option_id": "b" } }
-```
-
-Only the first answer of a player to the open question counts. Rejected answers (no open question, wrong question, already answered, eliminated player) are logged and ignored, no error is sent back.
+The only client message is `{ "type": "submit_answer", "data": { "question_id": "...", "option_id": "..." } }`. `game_joined` is written directly to the local hub; the other events go through Redis.
 
 ## Test UI
 
@@ -486,6 +312,5 @@ make migrate-up   # restart the API, which re-applies migrations
 
 - **Game state does not survive a restart.** Games live in memory only; Postgres keeps a record of games and players but is never read back.
 - **Single instance per game.** Events go through Redis pub/sub, but a game's state lives in the memory of the instance that created it. Running several API instances requires routing every request of a game (HTTP and WebSocket) to the same instance.
-- **Development defaults.** The session cookie is not marked `Secure`, the WebSocket upgrader accepts any origin and `SESSION_SECRET` has a public default. All three must be changed before a public deployment.
-- **Answers are readable.** `GET /question-lists/{id}/questions` returns `correct_option_id`, so any actor who can read a public list can see its answers.
-- **Catalog editing.** Questions can be created and updated but not reordered or deleted; question lists can only be created.
+- **Development defaults.** The session cookie is not marked `Secure`, `SESSION_SECRET` has a public default, and without `CORS_ALLOWED_ORIGINS` the WebSocket upgrader accepts any origin. Review all three before a public deployment.
+- **Same-site only in OIDC mode.** The session cookie is `SameSite=Lax`: a UI on another site than the API cannot use it, even with CORS.

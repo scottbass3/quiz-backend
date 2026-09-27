@@ -53,6 +53,10 @@ Per-game config: `POST /games` may set `initial_lives` and `answer_timeout_secon
 
 Persistence of a close lives in `GameHandler.persistClose`, registered with `Engine.OnQuestionClosed` at game creation, so manual and timeout closes are both persisted. Do not persist close results in the HTTP handler.
 
+What a client receives about the open question is built in one place, `Engine.questionPayloadLocked` (never the answer): `question_started`, `Engine.CurrentQuestion` (adds `answered_by`, used by `GET /games/{id}` and `game_joined`). `closes_at` is `QuestionStart` + timeout. `question_closed` and the close response carry the scoreboard (`Engine.scoreboardLocked`, sorted by name), also used for `GET /games/{id}` players. `AddPlayer` broadcasts `player_joined`.
+
+`SubmitAnswer` rejects unknown option IDs (`ErrInvalidOption`, the player may answer again). The WS message handler reports every rejected answer to that player only with `answer_rejected` and a code (`answerRejectCode`), through the local hub.
+
 Clients must be told explicitly when questions run out: `question_started.is_last`, `question_closed.remaining_questions`, `game_over.reason`, and `StartNextQuestion` returns `ErrNoMoreQuestions` (HTTP 409, `code: no_more_questions`) on a game finished by `no_more_questions`. Handlers map engine errors to stable codes in `writeGameError`.
 
 ### Game access rules
@@ -104,7 +108,9 @@ Auth lives in `internal/auth/`. Two modes controlled by `OIDC_ENABLED`:
 
 Role mapping: the claim named `OIDC_ROLE_CLAIM` (default: `role`) is checked; if it equals `OIDC_ADMIN_ROLE` (default: `admin`), the actor gets `ActorTypeAdmin`, otherwise `ActorTypeUser`. Both scalar string and string array claim values are handled.
 
-All routes except `/health`, `/auth/login`, `/auth/callback`, and `/auth/logout` are protected by `auth.Middleware`.
+All routes except `/health`, `/auth/login`, `/auth/callback`, and `/auth/logout` are protected by `auth.Middleware`. `corsMiddleware` (`internal/app/cors.go`) runs before it so preflights, which carry no cookie, are answered; it is a no-op when `CORS_ALLOWED_ORIGINS` is empty.
+
+`GET /games` lists the in-memory games where the caller is host or owns a player; `GET /games/{id}` adds `me` (`Engine.ActorView`). Both let a client recover its player after losing local state.
 
 `extractActor` in `internal/handler/actor.go` reads the actor from the context set by the middleware. It is the only place handlers access identity.
 
@@ -116,7 +122,9 @@ Docker Compose only passes the variables listed under `api.environment` in `dock
 - Public lists: created by `admin` actors, readable by all
 - Private lists: created by `user` actors, visible only to the owning actor
 
-Always use `canReadList` / `canEditList` (`internal/handler/actor.go`) for these rules; do not re-implement them inline.
+Always use `canReadList` / `canEditList` (`internal/handler/actor.go`) for these rules; do not re-implement them inline. `correct_option_id` is only returned to actors who can edit the list (`ListQuestions` blanks it, the JSON tag is `omitempty`).
+
+Editors can also rename and delete lists (questions and custom themes cascade; `games.question_list_id` is `ON DELETE SET NULL` since migration 004), delete questions (the store renumbers `order_index`) and reorder them (`PUT .../questions/order` with every question ID exactly once).
 
 ### Themes
 
@@ -129,15 +137,15 @@ Handler tests use `memStore` (`internal/handler/memstore_test.go`), an in-memory
 ### WebSocket lifecycle
 
 Each game has one `ws.Hub` (held in `app.gameSessionStore`). When a player connects to `/ws?gameId=&playerId=`:
-1. The handler looks up the engine and checks that the player exists and belongs to the current actor.
+1. The upgrader checks the `Origin` against `CORS_ALLOWED_ORIGINS` when it is set (`GameHandler.RestrictOrigins`), then the handler looks up the engine and checks that the player exists and belongs to the current actor.
 2. A `ws.Client` is created (buffered send channel, 256 msgs) and registered in the hub. One connection per player: `Hub.Register` closes the connection it replaces, and `Hub.Unregister(playerID, client)` only removes that exact client, so a replaced connection shutting down never unregisters the new one.
 3. `WritePump` and `ReadPump` run in separate goroutines.
-4. `game_joined` is sent to the player immediately.
+4. `game_joined` is sent to the player immediately, with its lives and the open question (so a reconnecting player can answer).
 5. Incoming client messages (`submit_answer`) are routed back to the engine.
 
 ### Migrations
 
-SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Three files are concatenated: `001_initial.sql` (base tables), `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`) and `003_themes.sql` (`themes` table + `theme_id` on questions). `app.New()` calls `pg.RunMigrations()` on every startup, which is safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
+SQL is embedded in the binary via `//go:embed` in `migrations/migrations.go`. Four files are concatenated: `001_initial.sql` (base tables), `002_question_lists.sql` (catalog tables + `question_list_id` column on `games`), `003_themes.sql` (`themes` table + `theme_id` on questions) and `004_catalog_deletes.sql` (`games.question_list_id` becomes `ON DELETE SET NULL`, in a guarded `DO` block). Statements that cannot use `IF NOT EXISTS` must be wrapped in a `DO` block that checks the catalog first. `app.New()` calls `pg.RunMigrations()` on every startup, which is safe because all statements use `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`.
 
 To add a migration: create `00N_name.sql`, embed it in `migrations.go`, and append it to `SQL`.
 
