@@ -44,6 +44,7 @@ type EventType string
 
 const (
 	EventGameJoined       EventType = "game_joined"
+	EventPlayerJoined     EventType = "player_joined"
 	EventQuestionStarted  EventType = "question_started"
 	EventAnswerSubmitted  EventType = "answer_submitted"
 	EventQuestionClosed   EventType = "question_closed"

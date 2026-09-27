@@ -110,6 +110,7 @@ func TestStartNextQuestion(t *testing.T) {
 	}
 
 	eng.AddQuestion(sampleQuestion())
+	hub.events = nil // ignore player_joined
 
 	if err := eng.StartNextQuestion(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -534,5 +535,16 @@ func TestQuestionStartedCarriesTheme(t *testing.T) {
 	eng.StartNextQuestion()
 	if got, _ := hub.lastPayload(t, domain.EventQuestionStarted)["theme"].(*domain.QuestionTheme); got != nil {
 		t.Fatalf("expected no theme, got %+v", got)
+	}
+}
+
+func TestAddPlayerBroadcastsPlayerJoined(t *testing.T) {
+	hub := newStubHub()
+	eng := newEngine(hub)
+	eng.AddPlayer("p1", "Alice", "actor-1")
+
+	p := hub.lastPayload(t, domain.EventPlayerJoined)
+	if p["player_id"] != "p1" || p["name"] != "Alice" || p["lives"] != 3 {
+		t.Fatalf("unexpected player_joined payload %v", p)
 	}
 }

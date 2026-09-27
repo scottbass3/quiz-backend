@@ -121,14 +121,15 @@ func NewEngine(gameID, ownerID, questionListID string, questions []*domain.Quest
 
 // AddPlayer registers a player owned by actorID (the authenticated actor who
 // joined). Only that actor may later act as this player over WebSocket.
+// It broadcasts player_joined so lobbies can update without polling.
 func (e *Engine) AddPlayer(id, name, actorID string) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if e.game.Status != domain.GameStatusWaiting {
+		e.mu.Unlock()
 		return ErrGameAlreadyStarted
 	}
 	if _, exists := e.game.Players[id]; exists {
+		e.mu.Unlock()
 		return ErrPlayerAlreadyJoined
 	}
 
@@ -140,7 +141,18 @@ func (e *Engine) AddPlayer(id, name, actorID string) error {
 		GameID:  e.game.ID,
 		ActorID: actorID,
 	}
+	lives := e.cfg.InitialLives
 	e.lastActivity = time.Now()
+	e.mu.Unlock()
+
+	e.hub.Broadcast(domain.Event{
+		Type: domain.EventPlayerJoined,
+		Payload: map[string]any{
+			"player_id": id,
+			"name":      name,
+			"lives":     lives,
+		},
+	})
 	return nil
 }
 
