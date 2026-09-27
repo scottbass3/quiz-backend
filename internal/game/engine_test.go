@@ -609,3 +609,23 @@ func TestSubmitAnswer_InvalidOption(t *testing.T) {
 		t.Fatalf("valid answer after an invalid one: %v", err)
 	}
 }
+
+func TestQuestionClosedCarriesScoreboard(t *testing.T) {
+	hub := newStubHub()
+	eng := twoQuestionEngine(hub, game.EngineConfig{InitialLives: 3})
+	eng.StartNextQuestion()
+	eng.SubmitAnswer("p1", "q1", "b") // correct
+
+	result, _ := eng.CloseQuestion()
+	scores, _ := hub.lastPayload(t, domain.EventQuestionClosed)["players"].([]game.PlayerScore)
+	want := []game.PlayerScore{
+		{ID: "p1", Name: "Alice", Lives: 3, Active: true},
+		{ID: "p2", Name: "Bob", Lives: 2, Active: true},
+	}
+	if len(scores) != 2 || scores[0] != want[0] || scores[1] != want[1] {
+		t.Fatalf("unexpected scoreboard %+v", scores)
+	}
+	if len(result.Players) != 2 {
+		t.Fatalf("close result should carry the scoreboard, got %+v", result.Players)
+	}
+}

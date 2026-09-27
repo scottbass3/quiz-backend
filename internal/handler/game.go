@@ -264,29 +264,6 @@ func (h *GameHandler) GetGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, gameView(eng, extractActor(r).ID))
 }
 
-// playerView is the public view of a player.
-type playerView struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Lives  int    `json:"lives"`
-	Active bool   `json:"active"`
-}
-
-// playerViews lists the players sorted by name, then ID, for a stable order.
-func playerViews(snap domain.Game) []playerView {
-	players := make([]playerView, 0, len(snap.Players))
-	for _, p := range snap.Players {
-		players = append(players, playerView{ID: p.ID, Name: p.Name, Lives: p.Lives, Active: p.Active})
-	}
-	sort.Slice(players, func(i, j int) bool {
-		if players[i].Name != players[j].Name {
-			return players[i].Name < players[j].Name
-		}
-		return players[i].ID < players[j].ID
-	})
-	return players
-}
-
 // gameView is the full state of a game as seen by actorID: everything a
 // client needs to rebuild its screen after a reload.
 func gameView(eng *game.Engine, actorID string) map[string]any {
@@ -297,7 +274,7 @@ func gameView(eng *game.Engine, actorID string) map[string]any {
 		"status":              snap.Status,
 		"owner_id":            snap.OwnerID,
 		"question_list_id":    snap.QuestionListID,
-		"players":             playerViews(snap),
+		"players":             eng.Scoreboard(), // sorted by name
 		"current_q_idx":       snap.CurrentQIdx,
 		"question_open":       snap.QuestionOpen,
 		"current_question":    eng.CurrentQuestion(), // null unless a question is open
@@ -415,6 +392,7 @@ func (h *GameHandler) CloseQuestion(w http.ResponseWriter, r *http.Request) {
 		"survivors":           result.Survivors,
 		"reason":              result.Reason,
 		"remaining_questions": result.RemainingQuestions,
+		"players":             result.Players,
 	})
 }
 

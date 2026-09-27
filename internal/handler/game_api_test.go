@@ -50,9 +50,9 @@ func gameServer(t *testing.T) (*httptest.Server, *game.Manager) {
 }
 
 type gameState struct {
-	Status          string         `json:"status"`
-	Players         []playerView   `json:"players"`
-	CurrentQuestion map[string]any `json:"current_question"`
+	Status          string             `json:"status"`
+	Players         []game.PlayerScore `json:"players"`
+	CurrentQuestion map[string]any     `json:"current_question"`
 	Me              struct {
 		IsHost    bool     `json:"is_host"`
 		PlayerIDs []string `json:"player_ids"`

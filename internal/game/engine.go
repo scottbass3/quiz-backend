@@ -56,6 +56,17 @@ type CloseQuestionResult struct {
 	// RemainingQuestions is the number of questions not played yet. It can be
 	// non-zero on game over when the game ended by elimination.
 	RemainingQuestions int
+
+	// Players is the scoreboard after this question, sorted by name.
+	Players []PlayerScore
+}
+
+// PlayerScore is a player's standing, as sent in question_closed.
+type PlayerScore struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Lives  int    `json:"lives"`
+	Active bool   `json:"active"`
 }
 
 type Engine struct {
@@ -439,6 +450,7 @@ func (e *Engine) closeQuestion(onlyIdx int) (*CloseQuestionResult, error) {
 		})
 	}
 
+	result.Players = e.scoreboardLocked()
 	correctOptionID := q.CorrectOptionID
 	questionID := q.ID
 	winner := result.Winner
@@ -455,6 +467,7 @@ func (e *Engine) closeQuestion(onlyIdx int) (*CloseQuestionResult, error) {
 			"question_id":         questionID,
 			"correct_option_id":   correctOptionID,
 			"remaining_questions": result.RemainingQuestions,
+			"players":             result.Players,
 		},
 	})
 	for _, pid := range result.LifeLost {
@@ -527,6 +540,29 @@ func (e *Engine) Expired(now time.Time, finishedTTL, idleTTL time.Duration) bool
 		return idle >= finishedTTL
 	}
 	return idle >= idleTTL
+}
+
+// Scoreboard lists every player's lives, sorted by name then ID.
+func (e *Engine) Scoreboard() []PlayerScore {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.scoreboardLocked()
+}
+
+// scoreboardLocked lists every player's lives, sorted by name then ID.
+// Caller holds the lock.
+func (e *Engine) scoreboardLocked() []PlayerScore {
+	scores := make([]PlayerScore, 0, len(e.game.Players))
+	for _, p := range e.game.Players {
+		scores = append(scores, PlayerScore{ID: p.ID, Name: p.Name, Lives: p.Lives, Active: p.Active})
+	}
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].Name != scores[j].Name {
+			return scores[i].Name < scores[j].Name
+		}
+		return scores[i].ID < scores[j].ID
+	})
+	return scores
 }
 
 func hasOption(q *domain.Question, optionID string) bool {
