@@ -13,6 +13,7 @@ type AuthHandler struct {
 	sessionSecret []byte
 	frontendURL   string
 	oidcEnabled   bool
+	secureCookies bool // mark cookies Secure (HTTPS only); SESSION_COOKIE_SECURE
 	logger        *slog.Logger
 }
 
@@ -21,6 +22,7 @@ func NewAuthHandler(
 	sessionSecret []byte,
 	frontendURL string,
 	oidcEnabled bool,
+	secureCookies bool,
 	logger *slog.Logger,
 ) *AuthHandler {
 	return &AuthHandler{
@@ -28,6 +30,7 @@ func NewAuthHandler(
 		sessionSecret: sessionSecret,
 		frontendURL:   frontendURL,
 		oidcEnabled:   oidcEnabled,
+		secureCookies: secureCookies,
 		logger:        logger,
 	}
 }
@@ -63,6 +66,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/auth",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   h.secureCookies,
 		MaxAge:   600,
 	})
 
@@ -109,8 +113,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Secure=false for local dev (no TLS). Set to true in production.
-	auth.SetSessionCookie(w, token, false)
+	auth.SetSessionCookie(w, token, h.secureCookies)
 
 	http.Redirect(w, r, h.frontendURL, http.StatusFound)
 }

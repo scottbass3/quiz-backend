@@ -222,7 +222,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	qlH := handler.NewQuestionListHandler(qls, ts, logger)
 	themeH := handler.NewThemeHandler(ts, qls, logger)
 	healthH := handler.NewHealthHandler()
-	authH := handler.NewAuthHandler(oidcProvider, sessionSecret, cfg.OIDCFrontendURL, cfg.OIDCEnabled, logger)
+	authH := handler.NewAuthHandler(oidcProvider, sessionSecret, cfg.OIDCFrontendURL, cfg.OIDCEnabled, cfg.SessionCookieSecure, logger)
 
 	// ── Router ──────────────────────────────────────────────────────────────────
 

@@ -36,6 +36,9 @@ type Config struct {
 	// SessionSecret is the HMAC key used to sign session JWTs and OAuth2 state cookies.
 	// Must be set to a random secret in production.
 	SessionSecret string
+	// SessionCookieSecure marks the session and OAuth2 state cookies Secure
+	// (sent over HTTPS only). Enable it in production.
+	SessionCookieSecure bool
 
 	// CORSAllowedOrigins is a comma-separated list of browser origins allowed
 	// to call the API cross-origin with credentials, and to open WebSockets.
@@ -64,7 +67,8 @@ func Load() *Config {
 		OIDCAdminRole:    getenv("OIDC_ADMIN_ROLE", "admin"),
 		OIDCFrontendURL:  getenv("OIDC_FRONTEND_URL", "http://localhost:5173"),
 
-		SessionSecret: getenv("SESSION_SECRET", "dev-secret-change-in-production"),
+		SessionSecret:       getenv("SESSION_SECRET", "dev-secret-change-in-production"),
+		SessionCookieSecure: parseBool(getenv("SESSION_COOKIE_SECURE", "false")),
 
 		CORSAllowedOrigins: getenv("CORS_ALLOWED_ORIGINS", ""),
 	}
