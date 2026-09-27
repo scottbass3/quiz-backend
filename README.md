@@ -10,7 +10,7 @@ Building a UI on top of this backend? Read the [frontend integration guide](docs
 
 - [Game rules](#game-rules)
 - [Architecture](#architecture)
-- [Getting started](#getting-started)
+- [Getting started](#getting-started) (including [production](#production))
 - [Configuration](#configuration)
 - [Authentication](#authentication)
 - [HTTP API](#http-api)
@@ -76,6 +76,8 @@ HTTP / WS request
 
 ### Key design decisions
 
+"Redis" below means the Redis protocol: the Compose files run [Dragonfly](https://www.dragonflydb.io/), a Redis-compatible store, and any Redis-compatible server works.
+
 - **Catalog vs runtime.** Question lists, their questions and themes live in Postgres. A game copies the questions of its list (with their theme) once, at creation, and never reads Postgres again for them.
 - **Game state in Redis, rules in Go.** The `game` package applies the rules; all game state (players, lives, current question, answers) lives in Redis behind a `StateStore` interface. Any API instance can serve any request of any game, and a game survives an API restart.
 - **Concurrency without an in-memory lock.** Join, start and close take a short per-game Redis lock. Answers skip it: a Lua script records the first answer only if the question is still open, and closing a question flips it closed and reads its answers in one atomic step, so an accepted answer is always counted.
@@ -100,13 +102,38 @@ HTTP / WS request
 
 ```bash
 cp .env.example .env   # optional, every variable has a default
-make up                # builds and starts api, postgres, redis and the test UI
+make up                # builds and starts api, postgres, dragonfly and the test UI
 ```
 
 - API: `http://localhost:8080`
 - Test UI: `http://localhost:5173`
 
 The API runs with [air](https://github.com/air-verse/air) and rebuilds on every `.go` change. Migrations run automatically when the API starts.
+
+### Production
+
+`Dockerfile.dev` is the development image: it ships the Go toolchain, compiles and hot-reloads the mounted sources with air at container start, and runs as root. It is only used by `docker-compose.yml`.
+
+`Dockerfile` is the production image: a static binary on distroless, running as a non-root user (about 23 MB), with migrations embedded. Its health check runs `/api healthcheck`, which probes `/health`.
+
+`docker-compose.prod.yml` runs the production stack:
+
+| Service     | Role                                                                                  |
+|-------------|---------------------------------------------------------------------------------------|
+| `api`       | the production image, `API_REPLICAS` replicas (default 2), not published              |
+| `lb`        | nginx round-robin over every replica (`deploy/nginx.conf`), the only published port (`HTTP_PORT`, default 80) |
+| `postgres`  | catalog and history (password required)                                              |
+| `dragonfly` | state of running games (password required, snapshot every minute)                    |
+
+```bash
+cp .env.prod.example .env.prod   # fill in the secrets and the OIDC settings
+make prod-up
+```
+
+- `SESSION_SECRET`, `POSTGRES_PASSWORD` and `REDIS_PASSWORD` are required: Compose refuses to start without them. `.env.prod` is git-ignored.
+- OIDC is on and cookies are `Secure` by default. Terminate TLS in front of `lb` (reverse proxy or cloud load balancer); `OIDC_REDIRECT_URL` must be the public URL of `/auth/callback`.
+- Scale with `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --scale api=4`: nginx re-resolves the replicas every 10 s, no reload needed.
+- The test UI is a development tool and is not part of this stack.
 
 ### Several instances
 
@@ -117,7 +144,7 @@ The API runs with [air](https://github.com/air-verse/air) and rebuilds on every 
 The API reads its configuration from the process environment only, it does not load `.env` by itself.
 
 ```bash
-docker compose up -d postgres redis
+docker compose up -d postgres dragonfly
 set -a && . ./.env && set +a
 go run ./cmd/api
 ```
@@ -130,14 +157,15 @@ go run ./cmd/api
 |----------------------|-----------------------------------------------------|------------------------------------------------------------|
 | `HTTP_ADDR`          | `:8080`                                             | Address the server listens on                              |
 | `DATABASE_URL`       | `postgres://quizz:quizz@localhost:5432/quizz?...`   | PostgreSQL DSN                                             |
-| `REDIS_ADDR`         | `localhost:6379`                                    | Redis address                                              |
-| `REDIS_PASSWORD`     | *(empty)*                                           | Redis password                                             |
+| `REDIS_ADDR`         | `localhost:6379`                                    | Address of the Redis-compatible store (Dragonfly)          |
+| `REDIS_PASSWORD`     | *(empty)*                                           | Password of that store                                     |
 | `LOG_LEVEL`          | `info`                                              | `debug`, `info`, `warn` or `error`                         |
 | `GAME_INITIAL_LIVES` | `3`                                                 | Lives per player                                           |
-| `GAME_FINISHED_TTL`  | `10m`                                               | How long a finished game stays in Redis                    |
+| `GAME_FINISHED_TTL`  | `10m`                                               | How long a finished game stays in the store                |
 | `GAME_IDLE_TTL`      | `2h`                                                | Expire unfinished games with no activity for this long     |
 | `SHUTDOWN_TIMEOUT`   | `10s`                                               | Graceful shutdown window                                   |
-| `SESSION_SECRET`     | `dev-secret-change-in-production`                   | HMAC key for session and OAuth2 state JWTs                 |
+| `SESSION_SECRET`     | `dev-secret-change-in-production`                   | HMAC key for session and OAuth2 state JWTs (same on every instance) |
+| `SESSION_COOKIE_SECURE` | `false`                                          | Mark the session and state cookies `Secure` (HTTPS only)   |
 | `OIDC_ENABLED`       | `false`                                             | `true` to use OIDC instead of the debug headers            |
 | `OIDC_ISSUER_URL`    | *(empty)*                                           | OIDC issuer (used for discovery)                           |
 | `OIDC_CLIENT_ID`     | *(empty)*                                           | OAuth2 client ID                                           |
@@ -162,7 +190,7 @@ Durations use Go syntax (`90s`, `10m`, `2h`). Invalid values fall back to the de
 | `POSTGRES_PASSWORD` | `quizz` | Postgres password               |
 | `POSTGRES_DB`       | `quizz` | Postgres database               |
 | `POSTGRES_PORT`     | `5432`  | Host port mapped to Postgres    |
-| `REDIS_PORT`        | `6379`  | Host port mapped to Redis       |
+| `DRAGONFLY_PORT`    | `6379`  | Host port mapped to Dragonfly   |
 
 Under Compose, `HTTP_ADDR`, `DATABASE_URL` and `REDIS_ADDR` are set by `docker-compose.yml` to reach the other containers. The values in `.env` for these three only apply to local runs.
 
@@ -307,7 +335,7 @@ make load-test        # game and room
 ## Useful commands
 
 ```bash
-make up           # start api, postgres, redis and the test UI
+make up           # start api, postgres, dragonfly and the test UI
 make up-multi     # same, plus a second API instance (api2, port 8081) and a load balancer (port 8090)
 make down         # stop all services
 make logs         # tail API logs
@@ -316,12 +344,15 @@ make test         # run all tests with the race detector
 make fmt          # gofmt (and goimports if installed)
 make lint         # golangci-lint, falls back to go vet
 make build        # build the binary into bin/api
+make prod-up      # production stack (docker-compose.prod.yml, settings in .env.prod)
+make prod-down    # stop it
+make prod-logs    # tail its API logs
 make shell        # open a shell in the API container
 make migrate-up   # restart the API, which re-applies migrations
 ```
 
 ## Known limitations
 
-- **Redis is required to play.** It holds every running game. It is persisted with its append-only file (fsync every second): a Redis crash can lose up to a second of game activity.
-- **Development defaults.** The session cookie is not marked `Secure`, `SESSION_SECRET` has a public default, and without `CORS_ALLOWED_ORIGINS` the WebSocket upgrader accepts any origin. Review all three before a public deployment.
+- **The game store is required to play.** Dragonfly holds every running game. It snapshots to disk every minute and reloads the snapshot at startup: a crash of Dragonfly can lose up to a minute of game activity.
+- **Development defaults.** `docker-compose.yml` is for development: `SESSION_SECRET` has a public default, cookies are not `Secure`, identity comes from debug headers and, without `CORS_ALLOWED_ORIGINS`, the WebSocket upgrader accepts any origin. Use the production stack below for anything public.
 - **Same-site only in OIDC mode.** The session cookie is `SameSite=Lax`: a UI on another site than the API cannot use it, even with CORS.

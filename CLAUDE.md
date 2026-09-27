@@ -30,9 +30,10 @@ HTTP/WS request (any instance)
 - `question_list_questions` table: ordered questions per list, optional `theme_id`
 - `themes` table: `question_list_id IS NULL` is a global theme, otherwise a custom theme of that list (exposed as `scope`: `global` / `list`)
 
-**Runtime** (in Redis):
+**Runtime** (in the Redis-compatible store, Dragonfly in the Compose files):
 - A game copies the questions of its list (with the answers) into Redis when `POST /games` is called; it never reads Postgres again.
-- Game state survives Postgres outages and API restarts; Redis is persisted with its append-only file.
+- Game state survives Postgres outages and API restarts. Dragonfly snapshots every minute (no append-only file).
+- Dragonfly requires every key a Lua script touches to be passed in `KEYS`: keep it that way when writing scripts (hash-tagged keys of one game are fine).
 
 ### Game state model
 
@@ -118,7 +119,7 @@ Auth lives in `internal/auth/`. Two modes controlled by `OIDC_ENABLED`:
 3. `auth.Middleware` validates the `quizz_session` cookie on every protected request and sets the actor in context.
 4. `POST /auth/logout`: clears the cookie.
 
-Sessions are stateless signed JWTs, so they work on every instance as long as they share `SESSION_SECRET`.
+Sessions are stateless signed JWTs, so they work on every instance as long as they share `SESSION_SECRET`. `SESSION_COOKIE_SECURE` marks the session and `oauth2_state` cookies `Secure`.
 
 Role mapping: the claim named `OIDC_ROLE_CLAIM` (default: `role`) is checked; if it equals `OIDC_ADMIN_ROLE` (default: `admin`), the actor gets `ActorTypeAdmin`, otherwise `ActorTypeUser`. Both scalar string and string array claim values are handled.
 
@@ -128,7 +129,7 @@ All routes except `/health`, `/auth/login`, `/auth/callback`, and `/auth/logout`
 
 `extractActor` in `internal/handler/actor.go` reads the actor from the context set by the middleware. It is the only place handlers access identity.
 
-Docker Compose only passes the variables listed under `api.environment` in `docker-compose.yml` (`api2` reuses them through a YAML anchor). A new config variable must be added there too, or it will be ignored under `make up`.
+Docker Compose only passes the variables listed under `api.environment` in `docker-compose.yml` (`api2` reuses them through a YAML anchor) and in `docker-compose.prod.yml`. A new config variable must be added to both, or it will be ignored.
 
 ### Question lists and access rules
 
@@ -176,6 +177,13 @@ Vite + Vue 3 + TypeScript dev tool, not production code. All HTTP calls go throu
 The `actor` reactive state (`src/actor.ts`) holds the debug identity (injected as `X-Debug-Actor-*` headers in dev mode). `PlayerCard.vue` remembers the actor used at join time and passes it as `debugActorType` / `debugActorId` on the WS URL. `fetchSession()` calls `GET /auth/me` on mount and populates `sessionUser`. `ActorBar.vue` shows OIDC user info + logout when `oidc_enabled: true`, or the debug controls when `oidc_enabled: false`.
 
 `ThemesPanel.vue` manages one theme scope (global without `listId`, a list's custom themes with it) and is used in the Themes tab and under the selected list. Global themes live in the shared `src/themes.ts` store so the question form sees changes made in the Themes tab. `api.ts` does not parse the body of `204` responses.
+
+## Docker
+
+- `Dockerfile.dev` + `docker-compose.yml`: development only (air hot reload on the mounted sources, root, debug identity, test UI). `make up`, `make up-multi`.
+- `Dockerfile`: production image (static binary on distroless, non-root, `/api healthcheck` as health check, see `cmd/api/healthcheck.go`).
+- `docker-compose.prod.yml` (project `quizz-prod`, settings in `.env.prod`, template `.env.prod.example`): `api` replicas behind `lb` (`deploy/nginx.conf`, re-resolves replicas through Docker DNS), `postgres`, `dragonfly`. Required secrets use `${VAR:?}`; OIDC and `SESSION_COOKIE_SECURE` default to on. `make prod-up` / `prod-down` / `prod-logs`.
+- A new config variable must be added to both compose files.
 
 ## Key design constraints
 
