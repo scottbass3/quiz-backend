@@ -38,14 +38,15 @@ func newUpgrader(allowedOrigins []string) websocket.Upgrader {
 	}
 }
 
-// gameSessionRegistry provides access to per-game broadcasters and WS hubs.
-// Implemented by app.gameSessionStore.
+// gameSessionRegistry gives the engine its event publisher and WebSocket
+// clients their local hub. Implemented by app.gameSessionStore.
 type gameSessionRegistry interface {
-	// GetOrCreate returns the broadcaster (used by the engine) and the hub (used for WS registration).
-	// Both are created on the first call for a given gameID; subsequent calls return the same pair.
-	GetOrCreate(gameID string) (game.Broadcaster, *appws.Hub)
-	// GetHub returns the WS hub for an existing game.
-	GetHub(gameID string) (*appws.Hub, bool)
+	// Broadcaster returns the publisher of a game's events.
+	Broadcaster(gameID string) game.Broadcaster
+	// Acquire returns the local hub of a game for a new WebSocket client;
+	// each successful call must be paired with Release.
+	Acquire(gameID string) (*appws.Hub, error)
+	Release(gameID string)
 }
 
 type GameHandler struct {
@@ -169,9 +170,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 	gameID := uuid.NewString()
 	ownerID := uuid.NewString()
 
-	// GetOrCreate wires the Redis pub/sub broadcaster (for the engine) to the WS hub (for clients).
-	broadcaster, _ := h.sessions.GetOrCreate(gameID)
-	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, engineCfg, broadcaster)
+	eng := h.manager.Create(gameID, ownerID, req.QuestionListID, questions, engineCfg, h.sessions.Broadcaster(gameID))
 	eng.OnQuestionClosed(func(res *game.CloseQuestionResult) { h.persistClose(gameID, res) })
 
 	if err := eng.AddPlayer(ownerID, req.OwnerName, a.ID); err != nil {
@@ -487,12 +486,15 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The hub handles local WS connection management; the broadcaster routes events via Redis.
-	hub, ok := h.sessions.GetHub(gameID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "game session not found")
+	// The local hub fans out the game's events (received from Redis) to this
+	// instance's clients.
+	hub, err := h.sessions.Acquire(gameID)
+	if err != nil {
+		h.logger.Error("ws: acquire game session", "error", err, "game_id", gameID)
+		writeError(w, http.StatusServiceUnavailable, "event stream unavailable")
 		return
 	}
+	defer h.sessions.Release(gameID)
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {

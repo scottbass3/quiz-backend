@@ -90,8 +90,9 @@ func (nopBroadcaster) BroadcastTo(string, domain.Event) {}
 
 type fakeSessions struct{}
 
-func (fakeSessions) GetOrCreate(string) (game.Broadcaster, *appws.Hub) { return nopBroadcaster{}, nil }
-func (fakeSessions) GetHub(string) (*appws.Hub, bool)                  { return nil, false }
+func (fakeSessions) Broadcaster(string) game.Broadcaster { return nopBroadcaster{} }
+func (fakeSessions) Acquire(string) (*appws.Hub, error)  { return nil, errors.New("no hub") }
+func (fakeSessions) Release(string)                      {}
 
 // recordingStore records the persistence calls made for a game.
 type recordingStore struct {

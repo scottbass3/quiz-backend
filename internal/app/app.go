@@ -22,18 +22,24 @@ import (
 	"github.com/scottbass3/quizz-backend/migrations"
 )
 
-// gameSession holds the per-game WebSocket hub and the Redis pub/sub broadcaster.
+// gameSession is this instance's local fan-out for one game: a WebSocket hub
+// and the Redis subscription feeding it. It exists only while local
+// WebSocket clients of that game are connected (refs > 0).
 type gameSession struct {
-	hub         *appws.Hub
-	broadcaster *appredis.PubSubBroadcaster
+	hub  *appws.Hub
+	stop func() // cancels the Redis subscription
+	refs int
 }
 
-// gameSessionStore manages per-game sessions (hub + Redis broadcaster).
+// gameSessionStore manages the local sessions of this instance. Game state
+// and event publishing do not depend on it: any instance can serve any game,
+// and events reach every instance with connected players through Redis.
 // It implements handler.gameSessionRegistry.
 type gameSessionStore struct {
-	mu       sync.RWMutex
+	mu       sync.Mutex
 	sessions map[string]*gameSession
 	rdb      *appredis.Client
+	pub      *appredis.Publisher
 	logger   *slog.Logger
 }
 
@@ -41,52 +47,74 @@ func newGameSessionStore(rdb *appredis.Client, logger *slog.Logger) *gameSession
 	return &gameSessionStore{
 		sessions: make(map[string]*gameSession),
 		rdb:      rdb,
+		pub:      appredis.NewPublisher(rdb.Unwrap(), logger),
 		logger:   logger,
 	}
 }
 
-// GetOrCreate returns the broadcaster (for the engine) and the hub (for WS registration).
-// If no session exists for gameID, both are created and the Redis subscriber is started.
-func (s *gameSessionStore) GetOrCreate(gameID string) (game.Broadcaster, *appws.Hub) {
+// Broadcaster returns the publisher of a game's events (used by the engine).
+func (s *gameSessionStore) Broadcaster(gameID string) game.Broadcaster {
+	return s.pub.For(gameID)
+}
+
+// Acquire returns the local hub of gameID for a new WebSocket client,
+// subscribing to the game's events on first use. Every successful Acquire
+// must be paired with a Release.
+func (s *gameSessionStore) Acquire(gameID string) (*appws.Hub, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if sess, ok := s.sessions[gameID]; ok {
-		return sess.broadcaster, sess.hub
+		sess.refs++
+		return sess.hub, nil
 	}
-
 	hub := appws.NewHub(s.logger)
-	b := appredis.NewPubSubBroadcaster(s.rdb.Unwrap(), gameID, hub, s.logger)
-
-	s.sessions[gameID] = &gameSession{hub: hub, broadcaster: b}
-	s.logger.Debug("game session created", "game_id", gameID)
-	return b, hub
-}
-
-// GetHub returns the WS hub for an existing game (used by the WebSocket upgrade handler).
-func (s *gameSessionStore) GetHub(gameID string) (*appws.Hub, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if sess, ok := s.sessions[gameID]; ok {
-		return sess.hub, true
+	stop, err := appredis.Subscribe(s.rdb.Unwrap(), gameID, hub, s.logger)
+	if err != nil {
+		return nil, fmt.Errorf("subscribe to game %s: %w", gameID, err)
 	}
-	return nil, false
+	s.sessions[gameID] = &gameSession{hub: hub, stop: stop, refs: 1}
+	s.logger.Debug("game session created", "game_id", gameID)
+	return hub, nil
 }
 
-// Remove releases a game's session: stops its Redis subscription and closes
-// its WebSocket connections. No-op if the game has no session.
-func (s *gameSessionStore) Remove(gameID string) {
+// Release drops a client's reference; the last one unsubscribes.
+func (s *gameSessionStore) Release(gameID string) {
 	s.mu.Lock()
-	sess, ok := s.sessions[gameID]
-	delete(s.sessions, gameID)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
 
+	sess, ok := s.sessions[gameID]
 	if !ok {
 		return
 	}
-	sess.broadcaster.Stop()
-	sess.hub.CloseAll()
+	if sess.refs--; sess.refs > 0 {
+		return
+	}
+	sess.stop()
+	delete(s.sessions, gameID)
 	s.logger.Debug("game session removed", "game_id", gameID)
+}
+
+// Remove closes the WebSocket connections of a game that no longer exists.
+// The clients' handlers then Release the session.
+func (s *gameSessionStore) Remove(gameID string) {
+	s.mu.Lock()
+	sess, ok := s.sessions[gameID]
+	s.mu.Unlock()
+	if ok {
+		sess.hub.CloseAll()
+	}
+}
+
+// GameIDs lists the games with local WebSocket clients.
+func (s *gameSessionStore) GameIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // Stop cancels all active Redis subscriptions. Called at shutdown.
@@ -94,7 +122,7 @@ func (s *gameSessionStore) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sess := range s.sessions {
-		sess.broadcaster.Stop()
+		sess.stop()
 	}
 	s.logger.Debug("game session store stopped", "count", len(s.sessions))
 }
