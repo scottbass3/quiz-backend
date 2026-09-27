@@ -21,6 +21,7 @@ var (
 	ErrNoActiveQuestion    = errors.New("no active question")
 	ErrWrongQuestion       = errors.New("question id does not match active question")
 	ErrQuestionOpen        = errors.New("current question is still open")
+	ErrInvalidOption       = errors.New("option id does not match any option of the question")
 )
 
 type EngineConfig struct {
@@ -331,6 +332,10 @@ func (e *Engine) SubmitAnswer(playerID, questionID, optionID string) error {
 		e.mu.Unlock()
 		return ErrAlreadyAnswered
 	}
+	if !hasOption(q, optionID) {
+		e.mu.Unlock()
+		return ErrInvalidOption
+	}
 
 	q.Answers[playerID] = &domain.Answer{
 		PlayerID:    playerID,
@@ -522,6 +527,15 @@ func (e *Engine) Expired(now time.Time, finishedTTL, idleTTL time.Duration) bool
 		return idle >= finishedTTL
 	}
 	return idle >= idleTTL
+}
+
+func hasOption(q *domain.Question, optionID string) bool {
+	for _, o := range q.Options {
+		if o.ID == optionID {
+			return true
+		}
+	}
+	return false
 }
 
 // leaderLocked returns the player with strictly the most lives among ids,

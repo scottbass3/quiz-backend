@@ -47,6 +47,7 @@ const (
 	EventPlayerJoined     EventType = "player_joined"
 	EventQuestionStarted  EventType = "question_started"
 	EventAnswerSubmitted  EventType = "answer_submitted"
+	EventAnswerRejected   EventType = "answer_rejected"
 	EventQuestionClosed   EventType = "question_closed"
 	EventLifeLost         EventType = "life_lost"
 	EventPlayerEliminated EventType = "player_eliminated"

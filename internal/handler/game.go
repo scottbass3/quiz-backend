@@ -531,10 +531,13 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// WritePump and ReadPump run in separate goroutines.
 	go client.WritePump(ctx)
-	client.ReadPump(ctx, h.makeMessageHandler(gameID))
+	client.ReadPump(ctx, h.makeMessageHandler(gameID, hub))
 }
 
-func (h *GameHandler) makeMessageHandler(gameID string) appws.MessageHandler {
+// makeMessageHandler routes client messages to the engine. A rejected answer
+// is reported to that player only, through the local hub (the connection is
+// on this instance), as answer_rejected with a stable code.
+func (h *GameHandler) makeMessageHandler(gameID string, hub *appws.Hub) appws.MessageHandler {
 	return func(playerID string, msg appws.IncomingMessage) {
 		eng, err := h.manager.Get(gameID)
 		if err != nil {
@@ -546,13 +549,47 @@ func (h *GameHandler) makeMessageHandler(gameID string) appws.MessageHandler {
 			var data appws.SubmitAnswerData
 			if err := json.Unmarshal(msg.Data, &data); err != nil {
 				h.logger.Warn("ws: invalid submit_answer payload", "player_id", playerID, "error", err)
+				rejectAnswer(hub, playerID, data, "invalid_message", "invalid submit_answer payload")
 				return
 			}
 			if err := eng.SubmitAnswer(playerID, data.QuestionID, data.OptionID); err != nil {
 				h.logger.Info("ws: submit answer rejected", "player_id", playerID, "error", err)
+				rejectAnswer(hub, playerID, data, answerRejectCode(err), err.Error())
 			}
 		default:
 			h.logger.Warn("ws: unknown message type", "type", msg.Type, "player_id", playerID)
 		}
+	}
+}
+
+func rejectAnswer(hub *appws.Hub, playerID string, data appws.SubmitAnswerData, code, msg string) {
+	hub.BroadcastTo(playerID, domain.Event{
+		Type: domain.EventAnswerRejected,
+		Payload: map[string]any{
+			"question_id": data.QuestionID,
+			"option_id":   data.OptionID,
+			"code":        code,
+			"error":       msg,
+		},
+	})
+}
+
+// answerRejectCode maps SubmitAnswer errors to the codes sent in answer_rejected.
+func answerRejectCode(err error) string {
+	switch {
+	case errors.Is(err, game.ErrNoActiveQuestion):
+		return "no_active_question"
+	case errors.Is(err, game.ErrWrongQuestion):
+		return "wrong_question"
+	case errors.Is(err, game.ErrAlreadyAnswered):
+		return "already_answered"
+	case errors.Is(err, game.ErrInvalidOption):
+		return "invalid_option"
+	case errors.Is(err, game.ErrPlayerEliminated):
+		return "player_eliminated"
+	case errors.Is(err, game.ErrGameNotRunning):
+		return "game_not_running"
+	default:
+		return "rejected"
 	}
 }

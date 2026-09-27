@@ -596,3 +596,16 @@ func TestActorView(t *testing.T) {
 		t.Fatalf("carol: expected nothing, got %v %v", isHost, ids)
 	}
 }
+
+func TestSubmitAnswer_InvalidOption(t *testing.T) {
+	eng := twoQuestionEngine(newStubHub(), game.EngineConfig{InitialLives: 3})
+	eng.StartNextQuestion()
+
+	if err := eng.SubmitAnswer("p1", "q1", "zzz"); err != game.ErrInvalidOption {
+		t.Fatalf("expected ErrInvalidOption, got %v", err)
+	}
+	// The invalid answer did not count: the player can still answer.
+	if err := eng.SubmitAnswer("p1", "q1", "b"); err != nil {
+		t.Fatalf("valid answer after an invalid one: %v", err)
+	}
+}

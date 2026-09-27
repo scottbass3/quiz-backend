@@ -162,3 +162,65 @@ func TestGameJoinedCarriesOpenQuestion(t *testing.T) {
 		t.Fatal("game_joined must not reveal the answer")
 	}
 }
+
+// readEvent reads the next event of one of the given types, skipping others.
+func readEvent(t *testing.T, conn *websocket.Conn, types ...domain.EventType) map[string]any {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		var ev struct {
+			Type    domain.EventType `json:"type"`
+			Payload map[string]any   `json:"payload"`
+		}
+		if err := conn.ReadJSON(&ev); err != nil {
+			t.Fatalf("waiting for %v: %v", types, err)
+		}
+		for _, typ := range types {
+			if ev.Type == typ {
+				ev.Payload["type"] = string(ev.Type)
+				return ev.Payload
+			}
+		}
+	}
+}
+
+func TestAnswerRejected(t *testing.T) {
+	srv, _ := gameServer(t)
+	gameID, _, bobID := createAndJoin(t, srv)
+	call(t, srv, alice, "POST", "/games/"+gameID+"/start", "", nil)
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?gameId=" + gameID + "&playerId=" + bobID + "&debugActorId=bob"
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	readEvent(t, conn, domain.EventGameJoined)
+
+	answer := func(questionID, optionID string) map[string]any {
+		conn.WriteJSON(map[string]any{"type": "submit_answer", "data": map[string]string{"question_id": questionID, "option_id": optionID}})
+		return readEvent(t, conn, domain.EventAnswerRejected, domain.EventAnswerSubmitted)
+	}
+
+	steps := []struct {
+		question, option string
+		wantType, code   string
+	}{
+		{"q2", "a", "answer_rejected", "wrong_question"},
+		{"q1", "zzz", "answer_rejected", "invalid_option"},
+		{"q1", "a", "answer_submitted", ""},
+		{"q1", "b", "answer_rejected", "already_answered"},
+	}
+	for _, s := range steps {
+		ev := answer(s.question, s.option)
+		if ev["type"] != s.wantType || (s.code != "" && ev["code"] != s.code) {
+			t.Fatalf("answer %s/%s: expected %s %s, got %v", s.question, s.option, s.wantType, s.code, ev)
+		}
+	}
+
+	call(t, srv, alice, "POST", "/games/"+gameID+"/close", "", nil)
+	readEvent(t, conn, domain.EventQuestionClosed)
+	if ev := answer("q1", "a"); ev["code"] != "no_active_question" {
+		t.Fatalf("answer after close: expected no_active_question, got %v", ev)
+	}
+}
