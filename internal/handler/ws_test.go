@@ -80,3 +80,34 @@ func TestWebSocketReconnectKeepsNewConnection(t *testing.T) {
 		t.Fatalf("new connection should receive events, got %+v (err %v)", ev, err)
 	}
 }
+
+func TestWebSocketOriginCheck(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hub := appws.NewHub(logger)
+	manager := game.NewManager()
+	eng := manager.Create("g1", "owner", "", nil, game.EngineConfig{InitialLives: 3}, hub)
+	eng.AddPlayer("p1", "Alice", "anonymous")
+	h := NewGameHandler(manager, hubSessions{hub}, nil, nil, nil, game.EngineConfig{InitialLives: 3}, logger)
+	h.RestrictOrigins([]string{"https://ui.example.com"})
+	srv := httptest.NewServer(http.HandlerFunc(h.WebSocket))
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?gameId=g1&playerId=p1"
+
+	cases := map[string]bool{"https://ui.example.com": true, "https://evil.example.com": false, "": true}
+	for origin, ok := range cases {
+		header := http.Header{}
+		if origin != "" {
+			header.Set("Origin", origin)
+		}
+		conn, resp, err := websocket.DefaultDialer.Dial(url, header)
+		if ok && err != nil {
+			t.Errorf("origin %q: expected success, got %v", origin, err)
+		}
+		if !ok && (err == nil || resp == nil || resp.StatusCode != http.StatusForbidden) {
+			t.Errorf("origin %q: expected 403, got err=%v", origin, err)
+		}
+		if conn != nil {
+			conn.Close()
+		}
+	}
+}

@@ -176,6 +176,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	// ── Handlers ────────────────────────────────────────────────────────────────
 
 	gameH := handler.NewGameHandler(manager, sessions, gs, ps, qls, defaultEngineCfg, logger)
+	allowedOrigins := parseOrigins(cfg.CORSAllowedOrigins)
+	if len(allowedOrigins) > 0 {
+		gameH.RestrictOrigins(allowedOrigins)
+		logger.Info("CORS enabled", "origins", allowedOrigins)
+	}
 	qlH := handler.NewQuestionListHandler(qls, ts, logger)
 	themeH := handler.NewThemeHandler(ts, qls, logger)
 	healthH := handler.NewHealthHandler()
@@ -184,6 +189,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	// ── Router ──────────────────────────────────────────────────────────────────
 
 	r := chi.NewRouter()
+	r.Use(corsMiddleware(allowedOrigins)) // first: preflights carry no credentials
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)

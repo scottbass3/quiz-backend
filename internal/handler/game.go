@@ -18,13 +18,24 @@ import (
 	appws "github.com/scottbass3/quizz-backend/internal/ws"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// Allow all origins in development. Restrict in production.
-		return true
-	},
+// newUpgrader builds the WebSocket upgrader. With no allowed origins every
+// origin is accepted (reverse proxies often rewrite Host, so a same-origin
+// check would reject legitimate clients). Otherwise browsers may only connect
+// from the listed origins; clients that send no Origin (non-browsers) are
+// always accepted.
+func newUpgrader(allowedOrigins []string) websocket.Upgrader {
+	allowed := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		allowed[o] = true
+	}
+	return websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return len(allowed) == 0 || origin == "" || allowed[origin]
+		},
+	}
 }
 
 // gameSessionRegistry provides access to per-game broadcasters and WS hubs.
@@ -45,6 +56,7 @@ type GameHandler struct {
 	questionListStore store.QuestionListStore
 	cfg               game.EngineConfig
 	logger            *slog.Logger
+	upgrader          websocket.Upgrader
 }
 
 func NewGameHandler(
@@ -64,7 +76,14 @@ func NewGameHandler(
 		questionListStore: questionListStore,
 		cfg:               cfg,
 		logger:            logger,
+		upgrader:          newUpgrader(nil),
 	}
+}
+
+// RestrictOrigins limits WebSocket handshakes from browsers to the given
+// origins (see newUpgrader). Call it before serving requests.
+func (h *GameHandler) RestrictOrigins(origins []string) {
+	h.upgrader = newUpgrader(origins)
 }
 
 // POST /games
@@ -475,7 +494,7 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("ws upgrade", "error", err)
 		return
