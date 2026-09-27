@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -344,4 +345,132 @@ func (h *QuestionListHandler) UpdateQuestion(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// PUT /question-lists/{id} (list editors)
+// Renames the list and/or changes its description. Visibility cannot change.
+func (h *QuestionListHandler) UpdateList(w http.ResponseWriter, r *http.Request) {
+	list, ok := h.loadEditableList(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	list.Name = strings.TrimSpace(req.Name)
+	list.Description = req.Description
+	list.UpdatedAt = time.Now().UTC()
+	if err := h.store.UpdateQuestionList(r.Context(), *list); err != nil {
+		h.logger.Error("update question list", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to update question list")
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// DELETE /question-lists/{id} (list editors)
+// Deletes the list, its questions and its custom themes. Games already
+// created from it are not affected (they hold their own copy).
+func (h *QuestionListHandler) DeleteList(w http.ResponseWriter, r *http.Request) {
+	list, ok := h.loadEditableList(w, r)
+	if !ok {
+		return
+	}
+	if err := h.store.DeleteQuestionList(r.Context(), list.ID); err != nil {
+		h.logger.Error("delete question list", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete question list")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// DELETE /question-lists/{id}/questions/{questionID} (list editors)
+// The following questions move up one position.
+func (h *QuestionListHandler) DeleteQuestion(w http.ResponseWriter, r *http.Request) {
+	list, ok := h.loadEditableList(w, r)
+	if !ok {
+		return
+	}
+	q, err := h.store.GetQuestion(r.Context(), chi.URLParam(r, "questionID"))
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		h.logger.Error("get question", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load question")
+		return
+	}
+	if err != nil || q.QuestionListID != list.ID {
+		writeError(w, http.StatusNotFound, "question not found")
+		return
+	}
+	if err := h.store.DeleteQuestion(r.Context(), q.ID); err != nil {
+		h.logger.Error("delete question", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete question")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// PUT /question-lists/{id}/questions/order (list editors)
+// Body: {"question_ids": [...]} listing every question of the list exactly
+// once, in the new order. Answers the reordered questions.
+func (h *QuestionListHandler) ReorderQuestions(w http.ResponseWriter, r *http.Request) {
+	list, ok := h.loadEditableList(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		QuestionIDs []string `json:"question_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	existing, err := h.store.ListQuestions(r.Context(), list.ID)
+	if err != nil {
+		h.logger.Error("list questions for reorder", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to reorder questions")
+		return
+	}
+	if !isPermutation(req.QuestionIDs, existing) {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_order",
+			"question_ids must list every question of the list exactly once")
+		return
+	}
+	if err := h.store.ReorderQuestions(r.Context(), list.ID, req.QuestionIDs); err != nil {
+		h.logger.Error("reorder questions", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to reorder questions")
+		return
+	}
+	questions, err := h.store.ListQuestions(r.Context(), list.ID)
+	if err != nil {
+		h.logger.Error("list questions after reorder", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list questions")
+		return
+	}
+	if questions == nil {
+		questions = []store.QuestionRecord{}
+	}
+	writeJSON(w, http.StatusOK, questions)
+}
+
+// isPermutation reports whether ids names each question exactly once.
+func isPermutation(ids []string, questions []store.QuestionRecord) bool {
+	if len(ids) != len(questions) {
+		return false
+	}
+	remaining := make(map[string]bool, len(questions))
+	for _, q := range questions {
+		remaining[q.ID] = true
+	}
+	for _, id := range ids {
+		if !remaining[id] {
+			return false // unknown or duplicate
+		}
+		delete(remaining, id)
+	}
+	return true
 }

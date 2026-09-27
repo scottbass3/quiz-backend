@@ -52,6 +52,67 @@ func (m *memStore) GetQuestionList(_ context.Context, id string) (*store.Questio
 	return &l, nil
 }
 
+func (m *memStore) UpdateQuestionList(_ context.Context, l store.QuestionListRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old, ok := m.lists[l.ID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	old.Name, old.Description, old.UpdatedAt = l.Name, l.Description, l.UpdatedAt
+	m.lists[l.ID] = old
+	return nil
+}
+
+func (m *memStore) DeleteQuestionList(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.lists[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(m.lists, id)
+	for qid, q := range m.questions {
+		if q.QuestionListID == id {
+			delete(m.questions, qid)
+		}
+	}
+	for tid, t := range m.themes {
+		if t.QuestionListID == id {
+			delete(m.themes, tid)
+		}
+	}
+	return nil
+}
+
+func (m *memStore) DeleteQuestion(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q, ok := m.questions[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	delete(m.questions, id)
+	for qid, o := range m.questions {
+		if o.QuestionListID == q.QuestionListID && o.OrderIndex > q.OrderIndex {
+			o.OrderIndex--
+			m.questions[qid] = o
+		}
+	}
+	return nil
+}
+
+func (m *memStore) ReorderQuestions(_ context.Context, listID string, ids []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, id := range ids {
+		if q, ok := m.questions[id]; ok && q.QuestionListID == listID {
+			q.OrderIndex = i
+			m.questions[id] = q
+		}
+	}
+	return nil
+}
+
 func (m *memStore) ListPublicQuestionLists(context.Context) ([]store.QuestionListRecord, error) {
 	return nil, nil
 }
@@ -207,7 +268,11 @@ func catalogServer(t *testing.T, m *memStore) *httptest.Server {
 		r.Post("/", qlH.Create)
 		r.Get("/{id}/questions", qlH.ListQuestions)
 		r.Post("/{id}/questions", qlH.AddQuestion)
+		r.Put("/{id}", qlH.UpdateList)
+		r.Delete("/{id}", qlH.DeleteList)
+		r.Put("/{id}/questions/order", qlH.ReorderQuestions)
 		r.Put("/{id}/questions/{questionID}", qlH.UpdateQuestion)
+		r.Delete("/{id}/questions/{questionID}", qlH.DeleteQuestion)
 		r.Get("/{id}/themes", themeH.ListForList)
 		r.Post("/{id}/themes", themeH.CreateForList)
 		r.Get("/{id}/themes/{themeID}", themeH.GetForList)

@@ -113,6 +113,12 @@ type PlayerStore interface {
 type QuestionListStore interface {
 	CreateQuestionList(ctx context.Context, l QuestionListRecord) error
 	GetQuestionList(ctx context.Context, id string) (*QuestionListRecord, error)
+	// UpdateQuestionList changes name, description and updated_at only.
+	// Returns ErrNotFound if the list does not exist.
+	UpdateQuestionList(ctx context.Context, l QuestionListRecord) error
+	// DeleteQuestionList removes the list with its questions and custom themes.
+	// Returns ErrNotFound if the list does not exist.
+	DeleteQuestionList(ctx context.Context, id string) error
 	ListPublicQuestionLists(ctx context.Context) ([]QuestionListRecord, error)
 	ListPrivateQuestionLists(ctx context.Context, ownerID string) ([]QuestionListRecord, error)
 	CreateQuestion(ctx context.Context, q QuestionRecord) error
@@ -121,6 +127,12 @@ type QuestionListStore interface {
 	// UpdateQuestion replaces text, options, correct option and theme.
 	// Returns ErrNotFound if the question does not exist.
 	UpdateQuestion(ctx context.Context, q QuestionRecord) error
+	// DeleteQuestion removes the question and renumbers the remaining ones of
+	// its list (order_index 0..n-1). Returns ErrNotFound if it does not exist.
+	DeleteQuestion(ctx context.Context, id string) error
+	// ReorderQuestions sets order_index from the position of each ID in
+	// questionIDs. The caller passes every question of the list exactly once.
+	ReorderQuestions(ctx context.Context, listID string, questionIDs []string) error
 	ListQuestions(ctx context.Context, listID string) ([]QuestionRecord, error)
 }
 

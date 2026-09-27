@@ -160,6 +160,31 @@ func (db *DB) GetQuestionList(ctx context.Context, id string) (*store.QuestionLi
 	return l, nil
 }
 
+func (db *DB) UpdateQuestionList(ctx context.Context, l store.QuestionListRecord) error {
+	tag, err := db.pool.Exec(ctx,
+		`UPDATE question_lists SET name = $1, description = $2, updated_at = $3 WHERE id = $4`,
+		l.Name, l.Description, l.UpdatedAt, l.ID)
+	if err != nil {
+		return fmt.Errorf("postgres: update question list: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: update question list: %w", store.ErrNotFound)
+	}
+	return nil
+}
+
+func (db *DB) DeleteQuestionList(ctx context.Context, id string) error {
+	// Questions and custom themes cascade; games.question_list_id is SET NULL.
+	tag, err := db.pool.Exec(ctx, `DELETE FROM question_lists WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("postgres: delete question list: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: delete question list: %w", store.ErrNotFound)
+	}
+	return nil
+}
+
 func (db *DB) ListPublicQuestionLists(ctx context.Context) ([]store.QuestionListRecord, error) {
 	rows, err := db.pool.Query(ctx,
 		`SELECT id, name, description, visibility, owner_type, owner_id, created_at, updated_at
@@ -232,6 +257,42 @@ func (db *DB) UpdateQuestion(ctx context.Context, q store.QuestionRecord) error 
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("postgres: update question: %w", store.ErrNotFound)
+	}
+	return nil
+}
+
+func (db *DB) DeleteQuestion(ctx context.Context, id string) error {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: delete question: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	var listID string
+	err = tx.QueryRow(ctx,
+		`DELETE FROM question_list_questions WHERE id = $1 RETURNING question_list_id`, id).Scan(&listID)
+	if err != nil {
+		return fmt.Errorf("postgres: delete question: %w", mapError(err))
+	}
+	// Close the gap left in the ordering.
+	if _, err := tx.Exec(ctx,
+		`UPDATE question_list_questions q SET order_index = r.pos
+		 FROM (SELECT id, row_number() OVER (ORDER BY order_index, created_at) - 1 AS pos
+		       FROM question_list_questions WHERE question_list_id = $1) r
+		 WHERE q.id = r.id`, listID); err != nil {
+		return fmt.Errorf("postgres: renumber questions: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+func (db *DB) ReorderQuestions(ctx context.Context, listID string, questionIDs []string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE question_list_questions q SET order_index = u.pos - 1
+		 FROM unnest($2::text[]) WITH ORDINALITY AS u(id, pos)
+		 WHERE q.id = u.id AND q.question_list_id = $1`,
+		listID, questionIDs)
+	if err != nil {
+		return fmt.Errorf("postgres: reorder questions: %w", err)
 	}
 	return nil
 }

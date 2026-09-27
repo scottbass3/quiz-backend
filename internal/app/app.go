@@ -220,7 +220,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 			r.Get("/{id}", qlH.Get)
 			r.Get("/{id}/questions", qlH.ListQuestions)
 			r.Post("/{id}/questions", qlH.AddQuestion)
+			r.Put("/{id}", qlH.UpdateList)
+			r.Delete("/{id}", qlH.DeleteList)
+			r.Put("/{id}/questions/order", qlH.ReorderQuestions)
 			r.Put("/{id}/questions/{questionID}", qlH.UpdateQuestion)
+			r.Delete("/{id}/questions/{questionID}", qlH.DeleteQuestion)
 
 			// Custom themes of a list.
 			r.Get("/{id}/themes", themeH.ListForList)
