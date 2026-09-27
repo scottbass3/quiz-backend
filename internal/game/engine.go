@@ -2,6 +2,7 @@ package game
 
 import (
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -73,6 +74,65 @@ type Engine struct {
 	// onQuestionClosed is called after every close, manual or by timeout.
 	// Guarded by mu.
 	onQuestionClosed func(*CloseQuestionResult)
+}
+
+// questionPayloadLocked describes the current question for players (never the
+// correct answer). Used by question_started and by CurrentQuestion, so a
+// client that reconnects gets exactly what it would have received live.
+// Caller holds the lock and the game has a started question.
+func (e *Engine) questionPayloadLocked() map[string]any {
+	idx := e.game.CurrentQIdx
+	q := e.game.Questions[idx]
+	total := len(e.game.Questions)
+	payload := map[string]any{
+		"question_id": q.ID,
+		"index":       idx,
+		"total":       total,
+		"is_last":     idx == total-1,
+		"text":        q.Text,
+		"options":     q.Options,
+		"theme":       q.Theme, // null when the question has no theme
+	}
+	if t := e.cfg.AnswerTimeoutSeconds; t > 0 {
+		payload["answer_timeout_seconds"] = t
+		payload["closes_at"] = e.game.QuestionStart.Add(time.Duration(t) * time.Second).UTC()
+	}
+	return payload
+}
+
+// CurrentQuestion returns the open question as sent in question_started,
+// plus "answered_by" (IDs of the players who already answered). It returns
+// nil when no question is open.
+func (e *Engine) CurrentQuestion() map[string]any {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if !e.game.QuestionOpen {
+		return nil
+	}
+	payload := e.questionPayloadLocked()
+	answered := make([]string, 0, len(e.game.Questions[e.game.CurrentQIdx].Answers))
+	for pid := range e.game.Questions[e.game.CurrentQIdx].Answers {
+		answered = append(answered, pid)
+	}
+	sort.Strings(answered)
+	payload["answered_by"] = answered
+	return payload
+}
+
+// ActorView tells what actorID is in this game: whether it is the host, and
+// the IDs of the players it owns (sorted).
+func (e *Engine) ActorView(actorID string) (isHost bool, playerIDs []string) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	playerIDs = []string{}
+	for id, p := range e.game.Players {
+		if p.ActorID == actorID {
+			playerIDs = append(playerIDs, id)
+		}
+	}
+	sort.Strings(playerIDs)
+	owner, ok := e.game.Players[e.game.OwnerID]
+	return ok && owner.ActorID == actorID, playerIDs
 }
 
 // Config returns the per-game configuration the engine was created with.
@@ -221,8 +281,8 @@ func (e *Engine) StartNextQuestion() error {
 	e.game.Status = domain.GameStatusRunning
 	e.game.CurrentQIdx = nextIdx
 	e.game.QuestionOpen = true
-	q := e.game.Questions[nextIdx]
-	total := len(e.game.Questions)
+	e.game.QuestionStart = time.Now()
+	payload := e.questionPayloadLocked()
 	timeout := e.cfg.AnswerTimeoutSeconds
 	if timeout > 0 {
 		// Armed under the lock so a close racing with this start can stop it.
@@ -233,18 +293,6 @@ func (e *Engine) StartNextQuestion() error {
 	e.lastActivity = time.Now()
 	e.mu.Unlock()
 
-	payload := map[string]any{
-		"question_id": q.ID,
-		"index":       nextIdx,
-		"total":       total,
-		"is_last":     nextIdx == total-1,
-		"text":        q.Text,
-		"options":     q.Options,
-		"theme":       q.Theme, // null when the question has no theme
-	}
-	if timeout > 0 {
-		payload["answer_timeout_seconds"] = timeout
-	}
 	event = domain.Event{Type: domain.EventQuestionStarted, Payload: payload}
 
 	e.hub.Broadcast(event)

@@ -548,3 +548,51 @@ func TestAddPlayerBroadcastsPlayerJoined(t *testing.T) {
 		t.Fatalf("unexpected player_joined payload %v", p)
 	}
 }
+
+func TestCurrentQuestion(t *testing.T) {
+	eng := twoQuestionEngine(newStubHub(), game.EngineConfig{InitialLives: 3, AnswerTimeoutSeconds: 30})
+
+	if eng.CurrentQuestion() != nil {
+		t.Fatal("no question before the first start")
+	}
+	before := time.Now()
+	eng.StartNextQuestion()
+	eng.SubmitAnswer("p2", "q1", "a")
+
+	cq := eng.CurrentQuestion()
+	if cq == nil || cq["question_id"] != "q1" || cq["is_last"] != false {
+		t.Fatalf("unexpected current question %v", cq)
+	}
+	if _, leaks := cq["correct_option_id"]; leaks {
+		t.Fatal("current question must not reveal the answer")
+	}
+	if got := cq["answered_by"].([]string); len(got) != 1 || got[0] != "p2" {
+		t.Fatalf("expected answered_by [p2], got %v", got)
+	}
+	closesAt := cq["closes_at"].(time.Time)
+	if closesAt.Before(before.Add(29*time.Second)) || closesAt.After(time.Now().Add(31*time.Second)) {
+		t.Fatalf("closes_at should be ~30s after start, got %v", closesAt)
+	}
+
+	eng.CloseQuestion()
+	if eng.CurrentQuestion() != nil {
+		t.Fatal("no current question once closed")
+	}
+}
+
+func TestActorView(t *testing.T) {
+	eng := newEngine(newStubHub()) // owner player id is "owner-1"
+	eng.AddPlayer("owner-1", "Host", "alice")
+	eng.AddPlayer("p2", "Second device", "alice")
+	eng.AddPlayer("p3", "Bob", "bob")
+
+	if isHost, ids := eng.ActorView("alice"); !isHost || len(ids) != 2 {
+		t.Fatalf("alice: expected host with 2 players, got %v %v", isHost, ids)
+	}
+	if isHost, ids := eng.ActorView("bob"); isHost || len(ids) != 1 || ids[0] != "p3" {
+		t.Fatalf("bob: expected player p3, got %v %v", isHost, ids)
+	}
+	if isHost, ids := eng.ActorView("carol"); isHost || len(ids) != 0 {
+		t.Fatalf("carol: expected nothing, got %v %v", isHost, ids)
+	}
+}

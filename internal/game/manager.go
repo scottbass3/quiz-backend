@@ -46,6 +46,17 @@ func (m *Manager) Get(gameID string) (*Engine, error) {
 	return eng, nil
 }
 
+// All returns every game currently in memory, in no particular order.
+func (m *Manager) All() []*Engine {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	all := make([]*Engine, 0, len(m.games))
+	for _, eng := range m.games {
+		all = append(all, eng)
+	}
+	return all
+}
+
 func (m *Manager) Delete(gameID string) {
 	m.mu.Lock()
 	delete(m.games, gameID)

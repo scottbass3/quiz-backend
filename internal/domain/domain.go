@@ -75,6 +75,7 @@ type Game struct {
 	Questions      []*Question    // runtime copy, loaded from the list at game creation
 	CurrentQIdx    int            // index of the last started question, -1 before the first
 	QuestionOpen   bool           // true between question_started and question_closed
+	QuestionStart  time.Time      // when the current question was started
 	EndReason      GameOverReason // empty until the game is finished
 	CreatedAt      time.Time
 }

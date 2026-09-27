@@ -258,3 +258,20 @@ func call(t *testing.T, srv *httptest.Server, a actor, method, path, body string
 	}
 	return resp.StatusCode
 }
+
+// memList returns a public list record for seeding a memStore.
+func memList(id string) store.QuestionListRecord {
+	return store.QuestionListRecord{ID: id, Name: id, Visibility: "public", OwnerType: "admin"}
+}
+
+// memQuestion returns a two-option question (correct option "a") for seeding a memStore.
+func memQuestion(id, listID string, order int) store.QuestionRecord {
+	return store.QuestionRecord{
+		ID:              id,
+		QuestionListID:  listID,
+		Text:            "question " + id,
+		Options:         []store.OptionRecord{{ID: "a", Text: "yes"}, {ID: "b", Text: "no"}},
+		CorrectOptionID: "a",
+		OrderIndex:      order,
+	}
+}

@@ -206,6 +206,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 
 		r.Route("/games", func(r chi.Router) {
 			r.Post("/", gameH.CreateGame)
+			r.Get("/", gameH.ListMyGames)
 			r.Get("/{id}", gameH.GetGame)
 			r.Post("/{id}/join", gameH.JoinGame)
 			r.Post("/{id}/start", gameH.StartNextQuestion)

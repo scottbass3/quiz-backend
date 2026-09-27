@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -260,36 +261,87 @@ func (h *GameHandler) GetGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap := eng.Snapshot()
+	writeJSON(w, http.StatusOK, gameView(eng, extractActor(r).ID))
+}
 
-	type playerView struct {
-		ID     string `json:"id"`
-		Name   string `json:"name"`
-		Lives  int    `json:"lives"`
-		Active bool   `json:"active"`
-	}
+// playerView is the public view of a player.
+type playerView struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Lives  int    `json:"lives"`
+	Active bool   `json:"active"`
+}
+
+// playerViews lists the players sorted by name, then ID, for a stable order.
+func playerViews(snap domain.Game) []playerView {
 	players := make([]playerView, 0, len(snap.Players))
 	for _, p := range snap.Players {
-		players = append(players, playerView{
-			ID:     p.ID,
-			Name:   p.Name,
-			Lives:  p.Lives,
-			Active: p.Active,
-		})
+		players = append(players, playerView{ID: p.ID, Name: p.Name, Lives: p.Lives, Active: p.Active})
 	}
+	sort.Slice(players, func(i, j int) bool {
+		if players[i].Name != players[j].Name {
+			return players[i].Name < players[j].Name
+		}
+		return players[i].ID < players[j].ID
+	})
+	return players
+}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+// gameView is the full state of a game as seen by actorID: everything a
+// client needs to rebuild its screen after a reload.
+func gameView(eng *game.Engine, actorID string) map[string]any {
+	snap := eng.Snapshot()
+	isHost, myPlayers := eng.ActorView(actorID)
+	return map[string]any{
 		"id":                  snap.ID,
 		"status":              snap.Status,
 		"owner_id":            snap.OwnerID,
 		"question_list_id":    snap.QuestionListID,
-		"players":             players,
+		"players":             playerViews(snap),
 		"current_q_idx":       snap.CurrentQIdx,
 		"question_open":       snap.QuestionOpen,
+		"current_question":    eng.CurrentQuestion(), // null unless a question is open
 		"total_questions":     len(snap.Questions),
 		"remaining_questions": len(snap.Questions) - snap.CurrentQIdx - 1,
 		"end_reason":          snap.EndReason,
-	})
+		"me":                  map[string]any{"is_host": isHost, "player_ids": myPlayers},
+	}
+}
+
+// GET /games — games in memory where the current actor is the host or owns
+// a player, newest first. Lets a client find its games again after losing
+// its local state.
+func (h *GameHandler) ListMyGames(w http.ResponseWriter, r *http.Request) {
+	actorID := extractActor(r).ID
+
+	type myGame struct {
+		ID             string            `json:"id"`
+		Status         domain.GameStatus `json:"status"`
+		QuestionListID string            `json:"question_list_id"`
+		TotalQuestions int               `json:"total_questions"`
+		CreatedAt      time.Time         `json:"created_at"`
+		IsHost         bool              `json:"is_host"`
+		PlayerIDs      []string          `json:"player_ids"`
+	}
+	games := []myGame{}
+	for _, eng := range h.manager.All() {
+		isHost, playerIDs := eng.ActorView(actorID)
+		if !isHost && len(playerIDs) == 0 {
+			continue
+		}
+		snap := eng.Snapshot()
+		games = append(games, myGame{
+			ID:             snap.ID,
+			Status:         snap.Status,
+			QuestionListID: snap.QuestionListID,
+			TotalQuestions: len(snap.Questions),
+			CreatedAt:      snap.CreatedAt.UTC(),
+			IsHost:         isHost,
+			PlayerIDs:      playerIDs,
+		})
+	}
+	sort.Slice(games, func(i, j int) bool { return games[i].CreatedAt.After(games[j].CreatedAt) })
+	writeJSON(w, http.StatusOK, games)
 }
 
 // POST /games/{id}/start — advance to the next question (host only)
@@ -456,16 +508,22 @@ func (h *GameHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	defer hub.Unregister(playerID, client)
 
 	// Notify the player they have joined. This goes straight to the local hub
-	// (not through Redis) so it arrives before the pumps start.
+	// (not through Redis) so it arrives before the pumps start. It carries the
+	// open question, if any, so a reconnecting player can answer it.
 	snap := eng.Snapshot()
+	me := snap.Players[playerID]
 	hub.BroadcastTo(playerID, domain.Event{
 		Type: domain.EventGameJoined,
 		Payload: map[string]any{
 			"game_id":          gameID,
 			"player_id":        playerID,
+			"is_host":          playerID == snap.OwnerID,
+			"lives":            me.Lives,
+			"active":           me.Active,
 			"status":           snap.Status,
 			"question_list_id": snap.QuestionListID,
 			"total_questions":  len(snap.Questions),
+			"current_question": eng.CurrentQuestion(), // null unless a question is open
 		},
 	})
 
