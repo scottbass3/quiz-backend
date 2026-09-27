@@ -1,4 +1,4 @@
-.PHONY: up up-multi down logs ui-logs test fmt lint migrate-up build load-test load-test-game load-test-room load-test-multi lb-check shell
+.PHONY: up up-multi down prod-up prod-down prod-logs logs ui-logs test fmt lint migrate-up build load-test load-test-game load-test-room load-test-multi lb-check shell
 
 # ── Docker Compose ──────────────────────────────────────────────────────────
 
@@ -17,6 +17,19 @@ logs:
 
 ui-logs:
 	docker compose logs -f ui
+
+# ── Production (docker-compose.prod.yml, settings in .env.prod) ─────────────
+
+PROD_COMPOSE = docker compose -f docker-compose.prod.yml --env-file .env.prod
+
+prod-up:
+	$(PROD_COMPOSE) up -d --build
+
+prod-down:
+	$(PROD_COMPOSE) down
+
+prod-logs:
+	$(PROD_COMPOSE) logs -f api
 
 # ── Build ───────────────────────────────────────────────────────────────────
 
