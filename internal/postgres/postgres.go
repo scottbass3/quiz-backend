@@ -40,10 +40,26 @@ func (db *DB) Close() {
 	db.pool.Close()
 }
 
+// migrationLockID identifies the advisory lock that serializes migrations.
+const migrationLockID = 7_420_130_001
+
 // RunMigrations executes the embedded SQL migration script.
-// All statements use IF NOT EXISTS so this is safe to call on every startup.
+// All statements are idempotent, so this is safe to call on every startup.
+// Instances starting together take turns through an advisory lock: concurrent
+// CREATE ... IF NOT EXISTS statements can otherwise fail on a fresh database.
 func (db *DB) RunMigrations(ctx context.Context, sql string) error {
-	if _, err := db.pool.Exec(ctx, sql); err != nil {
+	conn, err := db.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: run migrations: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
+		return fmt.Errorf("postgres: lock migrations: %w", err)
+	}
+	defer conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", migrationLockID) //nolint:errcheck
+
+	if _, err := conn.Exec(ctx, sql); err != nil {
 		return fmt.Errorf("postgres: run migrations: %w", err)
 	}
 	return nil
