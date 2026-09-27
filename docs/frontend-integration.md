@@ -484,7 +484,7 @@ The actor (session cookie, or debug parameters) must be the one that created `pl
 
 The server pings every 54 seconds and drops the connection if no pong comes back within 60 seconds. Browsers answer pings automatically; you have nothing to do. Client messages are limited to 4 KB.
 
-**One connection per player.** Opening a second WebSocket for the same player (new tab, page reload) through the same backend instance closes the previous one. Behind a load balancer the new connection may land on another instance: close the old socket yourself before reconnecting, otherwise both receive the events until the old one drops.
+**One connection per player.** Opening a new WebSocket for a player (new tab, page reload, network change) closes the previous one, whichever backend instance each of them is on: the newest connection receives the events, the old one gets closed. Nothing special is needed behind a load balancer.
 
 ### Server messages
 
@@ -816,7 +816,6 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
 | Games expire (10 min after the end, 2 h idle)       | handle `404` on game endpoints by returning home                              |
 | No public game discovery                            | share `game_id` out of band (link, QR code); `GET /games` only lists yours    |
 | Cross-site cookies are not supported                | in OIDC mode, the UI and the API must be on the same site (see section 2)     |
-| A player may hold one WebSocket per instance        | close the old socket before reconnecting, to avoid duplicate events           |
 
 ## 12. Integration checklist
 

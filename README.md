@@ -81,6 +81,7 @@ HTTP / WS request
 - **Concurrency without an in-memory lock.** Join, start and close take a short per-game Redis lock. Answers skip it: a Lua script records the first answer only if the question is still open, and closing a question flips it closed and reads its answers in one atomic step, so an accepted answer is always counted.
 - **Shared answer deadlines.** Timed questions register their deadline in a Redis sorted set that every instance polls; claiming a deadline is atomic, so each question is closed once, even if the instance that started it is gone.
 - **Transport-agnostic engine.** The engine only knows a `Broadcaster` interface. Events are published on Redis (`game:<id>:events`) from any instance; each instance subscribes to a game while it has WebSocket clients of that game, and forwards the events to them.
+- **One connection per player across instances.** Each WebSocket connection gets a generation from a per-player Redis counter and announces it on the game's channel; every instance closes its older connection of that player. The newest connection always wins, whatever the order of the messages, so reconnects through a load balancer never leave a duplicate.
 - **Best-effort persistence.** Postgres keeps a history of games and players (lives, status). Writes are logged on failure but never abort a request, and are never read back for gameplay.
 - **Expiry.** Game data expires in Redis: `GAME_FINISHED_TTL` after the end of a game, `GAME_IDLE_TTL` after the last activity of an unfinished one. Instances then close the WebSocket connections of expired games.
 - **Embedded migrations.** SQL files are embedded with `//go:embed` and applied on every startup. Every statement is idempotent (`IF NOT EXISTS`), so no external migration tool is needed.
@@ -109,7 +110,7 @@ The API runs with [air](https://github.com/air-verse/air) and rebuilds on every 
 
 ### Several instances
 
-`make up-multi` also starts `api2`, a second API instance sharing Postgres and Redis (port `HTTP_PORT_2`, default 8081). Any request of any game can go to either instance, for example behind a round-robin load balancer; `make load-test-multi` checks it with k6.
+`make up-multi` also starts `api2`, a second API instance sharing Postgres and Redis (port `HTTP_PORT_2`, default 8081), and `lb`, an nginx round-robin load balancer in front of both (port `LB_PORT`, default 8090). Any request of any game, WebSocket reconnects included, can go to either instance: `make load-test-multi` plays one game across them and `make lb-check` reconnects a player repeatedly through the load balancer. In production, every instance must use the same `SESSION_SECRET` (sessions are signed cookies checked by whichever instance receives the request), and the load balancer must allow WebSocket upgrades with a read timeout above the 54 s server ping (see `tools/lb/nginx.conf`).
 
 ### Without Docker (API only)
 
@@ -155,6 +156,7 @@ Durations use Go syntax (`90s`, `10m`, `2h`). Invalid values fall back to the de
 |---------------------|---------|---------------------------------|
 | `HTTP_PORT`         | `8080`  | Host port mapped to the API     |
 | `HTTP_PORT_2`       | `8081`  | Host port of `api2` (`make up-multi`) |
+| `LB_PORT`           | `8090`  | Host port of the load balancer (`make up-multi`) |
 | `UI_PORT`           | `5173`  | Host port mapped to the test UI |
 | `POSTGRES_USER`     | `quizz` | Postgres user                   |
 | `POSTGRES_PASSWORD` | `quizz` | Postgres password               |
@@ -296,6 +298,7 @@ Load tests use k6 against a running stack (`make up`). `BASE_URL` and `WS_URL` d
 make load-test-game   # 10 VUs for 2 minutes, each playing a full one-player game
 make load-test-room   # NUM_PLAYERS players (default 50) in a single game
 make load-test-multi  # one game spread over api and api2 (needs make up-multi)
+make lb-check         # reconnect a player through the load balancer (needs make up-multi)
 make load-test        # game and room
 ```
 
@@ -305,7 +308,7 @@ make load-test        # game and room
 
 ```bash
 make up           # start api, postgres, redis and the test UI
-make up-multi     # same, plus a second API instance (api2) on port 8081
+make up-multi     # same, plus a second API instance (api2, port 8081) and a load balancer (port 8090)
 make down         # stop all services
 make logs         # tail API logs
 make ui-logs      # tail test UI logs
@@ -320,6 +323,5 @@ make migrate-up   # restart the API, which re-applies migrations
 ## Known limitations
 
 - **Redis is required to play.** It holds every running game. It is persisted with its append-only file (fsync every second): a Redis crash can lose up to a second of game activity.
-- **Duplicate connections across instances.** A player has one WebSocket per instance. If a client reconnects through another instance while its old connection is still open, both receive the events until the old one closes.
 - **Development defaults.** The session cookie is not marked `Secure`, `SESSION_SECRET` has a public default, and without `CORS_ALLOWED_ORIGINS` the WebSocket upgrader accepts any origin. Review all three before a public deployment.
 - **Same-site only in OIDC mode.** The session cookie is `SameSite=Lax`: a UI on another site than the API cannot use it, even with CORS.

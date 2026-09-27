@@ -6,7 +6,7 @@ Common commands are listed in the Makefile (`make test` runs `go test ./... -rac
 
 The test-ui (Vite dev server) is at **http://localhost:5173**.
 The API is at **http://localhost:8080** (overridable via `HTTP_PORT` in `.env`).
-`make up-multi` also starts a second API instance, `api2`, on **http://localhost:8081** (`HTTP_PORT_2`); `make load-test-multi` plays one game across both.
+`make up-multi` also starts a second API instance, `api2`, on **http://localhost:8081** (`HTTP_PORT_2`) and an nginx round-robin load balancer on **http://localhost:8090** (`LB_PORT`, config in `tools/lb/nginx.conf`); `make load-test-multi` plays one game across the instances and `make lb-check` (`tools/lbcheck`) reconnects a player through the load balancer. On this machine ports 8080 and 8090 are taken by other projects: use `HTTP_PORT=18080 LB_PORT=18090`.
 
 ## Architecture
 
@@ -49,6 +49,7 @@ Redis layout (keys of a game share the `{id}` hash tag, so they sit in one Clust
 | `game:{id}:lock`            | string | per-game lock token                                        |
 | `actor:{actor}:games`       | zset   | game IDs of an actor, by creation time (`GET /games`)      |
 | `games:deadlines`           | zset   | `gameID|idx` by answer deadline (ms)                       |
+| `game:{id}:conns`           | hash   | player ID → latest WebSocket connection generation         |
 
 Concurrency rules (keep them when touching the engine or the store):
 - **Transitions** (join, start, close) run under `StateStore.Lock` (`SET NX PX`, 10s expiry, `ErrBusy` → HTTP 503 `game_busy` after 5s of waiting). `Engine.locked` loads the state under the lock.
@@ -86,7 +87,7 @@ Clients must be told explicitly when questions run out: `question_started.is_las
 
 ### Events across instances
 
-`redis.Publisher` (`For(gameID)` returns a `game.Broadcaster`) publishes `{t: target, e: event}` on `game:<id>:events` from any instance; it holds no subscription.
+`redis.Publisher` (`For(gameID)` returns a `game.Broadcaster`) publishes `{t: target, e: event}` on `game:<id>:events` from any instance; it holds no subscription. The same channel carries connection claims `{c: {p: player, s: generation}}` (see WebSocket lifecycle).
 
 `app.gameSessionStore` keeps, per instance, a local `ws.Hub` and a Redis subscription (`redis.Subscribe`, which waits for Redis to confirm) for each game that has WebSocket clients **on this instance**. `Acquire` creates them on the first client, `Release` drops them with the last one (reference counted). `App.sweepSessions` closes the local connections of games that no longer exist in Redis.
 
@@ -150,10 +151,11 @@ Postgres errors are translated by `mapError` into `store.ErrNotFound` / `store.E
 When a player connects to `/ws?gameId=&playerId=` (on any instance):
 1. The upgrader checks the `Origin` against `CORS_ALLOWED_ORIGINS` when it is set (`GameHandler.RestrictOrigins`), then the handler loads the state and checks that the player exists and belongs to the current actor.
 2. `gameSessionStore.Acquire` returns this instance's hub for the game (subscribing to Redis if needed); the handler `Release`s it when the connection ends.
-3. A `ws.Client` is created (buffered send channel, 256 msgs) and registered in the hub. One connection per player per hub: `Hub.Register` closes the connection it replaces, and `Hub.Unregister(playerID, client)` only removes that exact client. (A player connected to two instances at once keeps both connections.)
-4. `WritePump` and `ReadPump` run in separate goroutines.
-5. `game_joined` is sent to the player immediately, with its lives and the open question (so a reconnecting player can answer).
-6. Incoming client messages (`submit_answer`) are routed back to the engine.
+3. `gameSessionStore.ClaimConnection` gives the connection its **generation**: `HINCRBY game:{id}:conns <player>` in Redis, then a claim message on the game's channel. Every instance subscribed to the game calls `Hub.Claim(player, seq)`, which closes its local connection of that player if it is older. Hubs remember the highest generation announced per player (`Hub.latest`), so `Hub.Register` refuses a connection overtaken by a newer one, even if the claim arrived before the registration. The instance subscribes (step 2) before drawing its generation, so it receives every later claim. Result: one live connection per player across all instances, the newest one, independently of message order.
+4. A `ws.Client` is created with that generation (buffered send channel, 256 msgs) and registered in the hub; `Hub.Unregister(playerID, client)` only removes that exact client.
+5. `WritePump` and `ReadPump` run in separate goroutines.
+6. `game_joined` is sent to the player immediately, with its lives and the open question (so a reconnecting player can answer).
+7. Incoming client messages (`submit_answer`) are routed back to the engine.
 
 ### Migrations
 
