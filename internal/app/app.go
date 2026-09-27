@@ -167,7 +167,9 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 
 	// Game layer: default config; individual games may override it via POST /games.
 	defaultEngineCfg := game.EngineConfig{InitialLives: cfg.GameInitialLives}
-	manager := game.NewManager()
+	// Game state lives in Redis, so any instance can serve any game.
+	stateStore := appredis.NewGameStateStore(rdb.Unwrap(), cfg.GameIdleTTL, cfg.GameFinishedTTL)
+	manager := game.NewManager(stateStore, sessions.Broadcaster, logger)
 	a.manager = manager
 
 	// Stores
@@ -294,7 +296,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 
-	go a.sweepGames(ctx)
+	go a.manager.RunDeadlines(ctx, deadlineInterval)
+	go a.sweepSessions(ctx)
 
 	go func() {
 		a.logger.Info("server starting", "addr", a.cfg.HTTPAddr)
@@ -327,12 +330,17 @@ func (a *App) Run(ctx context.Context) error {
 	return nil
 }
 
-// sweepInterval is how often expired games are evicted from memory.
+// deadlineInterval is how often this instance looks for questions whose
+// answer deadline has passed. Every instance polls; each deadline is claimed
+// by exactly one of them.
+const deadlineInterval = 250 * time.Millisecond
+
+// sweepInterval is how often local WebSocket sessions of expired games are closed.
 const sweepInterval = time.Minute
 
-// sweepGames periodically evicts finished and idle games from memory and
-// releases their Redis subscription and WebSocket connections.
-func (a *App) sweepGames(ctx context.Context) {
+// sweepSessions closes the local WebSocket connections of games that expired
+// in Redis (finished or idle), so their clients learn the game is gone.
+func (a *App) sweepSessions(ctx context.Context) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 
@@ -340,13 +348,17 @@ func (a *App) sweepGames(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
-			removed := a.manager.Sweep(now, a.cfg.GameFinishedTTL, a.cfg.GameIdleTTL)
-			for _, id := range removed {
-				a.sessions.Remove(id)
-			}
-			if len(removed) > 0 {
-				a.logger.Info("evicted games", "count", len(removed), "remaining", a.manager.Count())
+		case <-ticker.C:
+			for _, id := range a.sessions.GameIDs() {
+				ok, err := a.manager.Exists(ctx, id)
+				if err != nil {
+					a.logger.Error("check game exists", "error", err, "game_id", id)
+					continue
+				}
+				if !ok {
+					a.sessions.Remove(id)
+					a.logger.Info("closed connections of expired game", "game_id", id)
+				}
 			}
 		}
 	}

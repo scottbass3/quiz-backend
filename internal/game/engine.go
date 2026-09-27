@@ -1,15 +1,16 @@
 package game
 
 import (
+	"context"
 	"errors"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/scottbass3/quizz-backend/internal/domain"
 )
 
 var (
+	ErrGameNotFound        = errors.New("game not found")
 	ErrGameAlreadyStarted  = errors.New("game already started")
 	ErrGameNotRunning      = errors.New("game is not running")
 	ErrGameFinished        = errors.New("game is finished")
@@ -22,6 +23,7 @@ var (
 	ErrWrongQuestion       = errors.New("question id does not match active question")
 	ErrQuestionOpen        = errors.New("current question is still open")
 	ErrInvalidOption       = errors.New("option id does not match any option of the question")
+	ErrBusy                = errors.New("game is busy, retry")
 )
 
 type EngineConfig struct {
@@ -29,15 +31,16 @@ type EngineConfig struct {
 	AnswerTimeoutSeconds int // 0 = no timeout
 }
 
-// Broadcaster is implemented by redis.PubSubBroadcaster in production and by
-// ws.Hub directly. The engine uses it to push events without knowing the transport.
+// Broadcaster delivers game events to players. It is implemented by
+// redis.GamePublisher in production (events reach every instance) and by
+// ws.Hub directly in tests. The engine does not know the transport.
 type Broadcaster interface {
 	Broadcast(event domain.Event)
 	BroadcastTo(playerID string, event domain.Event)
 }
 
 // LifeDelta records the life change for a single player after closing a question.
-// Used for best-effort persistence to Postgres without needing a second snapshot.
+// Used for best-effort persistence to Postgres.
 type LifeDelta struct {
 	PlayerID  string
 	LivesLeft int
@@ -61,161 +64,63 @@ type CloseQuestionResult struct {
 	Players []PlayerScore
 }
 
-// PlayerScore is a player's standing, as sent in question_closed.
-type PlayerScore struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Lives  int    `json:"lives"`
-	Active bool   `json:"active"`
-}
-
+// Engine applies the game rules to one game. It holds no state itself: every
+// operation reads and writes the StateStore, so any instance can serve any
+// game. The critical rule is unchanged: events are broadcast after the
+// transition is stored and the lock is released.
 type Engine struct {
-	mu   sync.RWMutex
-	game *domain.Game
-	cfg  EngineConfig
-	hub  Broadcaster
-
-	// lastActivity is the time of the last state change (join, question
-	// started/closed, answer). Used by Manager.Sweep to evict stale games.
-	lastActivity time.Time
-
-	// answerTimer auto-closes the open question after AnswerTimeoutSeconds.
-	// Armed on start, stopped on close. Guarded by mu.
-	answerTimer *time.Timer
-
-	// onQuestionClosed is called after every close, manual or by timeout.
-	// Guarded by mu.
-	onQuestionClosed func(*CloseQuestionResult)
+	m   *Manager
+	id  string
+	hub Broadcaster
 }
 
-// questionPayloadLocked describes the current question for players (never the
-// correct answer). Used by question_started and by CurrentQuestion, so a
-// client that reconnects gets exactly what it would have received live.
-// Caller holds the lock and the game has a started question.
-func (e *Engine) questionPayloadLocked() map[string]any {
-	idx := e.game.CurrentQIdx
-	q := e.game.Questions[idx]
-	total := len(e.game.Questions)
-	payload := map[string]any{
-		"question_id": q.ID,
-		"index":       idx,
-		"total":       total,
-		"is_last":     idx == total-1,
-		"text":        q.Text,
-		"options":     q.Options,
-		"theme":       q.Theme, // null when the question has no theme
-	}
-	if t := e.cfg.AnswerTimeoutSeconds; t > 0 {
-		payload["answer_timeout_seconds"] = t
-		payload["closes_at"] = e.game.QuestionStart.Add(time.Duration(t) * time.Second).UTC()
-	}
-	return payload
+// ID returns the game ID.
+func (e *Engine) ID() string { return e.id }
+
+// State loads the current state of the game.
+func (e *Engine) State(ctx context.Context) (*State, error) {
+	return e.m.store.Load(ctx, e.id)
 }
 
-// CurrentQuestion returns the open question as sent in question_started,
-// plus "answered_by" (IDs of the players who already answered). It returns
-// nil when no question is open.
-func (e *Engine) CurrentQuestion() map[string]any {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if !e.game.QuestionOpen {
-		return nil
+// locked runs fn with the game's lock held and the state loaded under it.
+func (e *Engine) locked(ctx context.Context, fn func(s *State) error) error {
+	unlock, err := e.m.store.Lock(ctx, e.id)
+	if err != nil {
+		return err
 	}
-	payload := e.questionPayloadLocked()
-	answered := make([]string, 0, len(e.game.Questions[e.game.CurrentQIdx].Answers))
-	for pid := range e.game.Questions[e.game.CurrentQIdx].Answers {
-		answered = append(answered, pid)
+	defer unlock()
+	s, err := e.m.store.Load(ctx, e.id)
+	if err != nil {
+		return err
 	}
-	sort.Strings(answered)
-	payload["answered_by"] = answered
-	return payload
-}
-
-// ActorView tells what actorID is in this game: whether it is the host, and
-// the IDs of the players it owns (sorted).
-func (e *Engine) ActorView(actorID string) (isHost bool, playerIDs []string) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	playerIDs = []string{}
-	for id, p := range e.game.Players {
-		if p.ActorID == actorID {
-			playerIDs = append(playerIDs, id)
-		}
-	}
-	sort.Strings(playerIDs)
-	owner, ok := e.game.Players[e.game.OwnerID]
-	return ok && owner.ActorID == actorID, playerIDs
-}
-
-// Config returns the per-game configuration the engine was created with.
-func (e *Engine) Config() EngineConfig {
-	return e.cfg // immutable after NewEngine
-}
-
-// OnQuestionClosed registers fn to be called after every question close,
-// whether triggered by CloseQuestion or by the answer timeout. It runs on the
-// closing goroutine after events are broadcast and the lock is released.
-// Used for persistence, which the engine itself knows nothing about.
-func (e *Engine) OnQuestionClosed(fn func(*CloseQuestionResult)) {
-	e.mu.Lock()
-	e.onQuestionClosed = fn
-	e.mu.Unlock()
-}
-
-// NewEngine creates a new game engine.
-// questions is the pre-loaded set from the question list (may be nil for tests).
-func NewEngine(gameID, ownerID, questionListID string, questions []*domain.Question, cfg EngineConfig, hub Broadcaster) *Engine {
-	if questions == nil {
-		questions = make([]*domain.Question, 0)
-	}
-	// Ensure every question has an Answers map.
-	for _, q := range questions {
-		if q.Answers == nil {
-			q.Answers = make(map[string]*domain.Answer)
-		}
-	}
-	return &Engine{
-		game: &domain.Game{
-			ID:             gameID,
-			Status:         domain.GameStatusWaiting,
-			OwnerID:        ownerID,
-			QuestionListID: questionListID,
-			Players:        make(map[string]*domain.Player),
-			Questions:      questions,
-			CurrentQIdx:    -1,
-			CreatedAt:      time.Now(),
-		},
-		cfg:          cfg,
-		hub:          hub,
-		lastActivity: time.Now(),
-	}
+	return fn(s)
 }
 
 // AddPlayer registers a player owned by actorID (the authenticated actor who
 // joined). Only that actor may later act as this player over WebSocket.
 // It broadcasts player_joined so lobbies can update without polling.
-func (e *Engine) AddPlayer(id, name, actorID string) error {
-	e.mu.Lock()
-	if e.game.Status != domain.GameStatusWaiting {
-		e.mu.Unlock()
-		return ErrGameAlreadyStarted
+func (e *Engine) AddPlayer(ctx context.Context, id, name, actorID string) error {
+	var lives int
+	err := e.locked(ctx, func(s *State) error {
+		if s.Status != domain.GameStatusWaiting {
+			return ErrGameAlreadyStarted
+		}
+		if _, exists := s.Players[id]; exists {
+			return ErrPlayerAlreadyJoined
+		}
+		lives = s.Config.InitialLives
+		return e.m.store.AddPlayer(ctx, e.id, s.CreatedAt, &domain.Player{
+			ID:      id,
+			Name:    name,
+			Lives:   lives,
+			Active:  true,
+			GameID:  e.id,
+			ActorID: actorID,
+		})
+	})
+	if err != nil {
+		return err
 	}
-	if _, exists := e.game.Players[id]; exists {
-		e.mu.Unlock()
-		return ErrPlayerAlreadyJoined
-	}
-
-	e.game.Players[id] = &domain.Player{
-		ID:      id,
-		Name:    name,
-		Lives:   e.cfg.InitialLives,
-		Active:  true,
-		GameID:  e.game.ID,
-		ActorID: actorID,
-	}
-	lives := e.cfg.InitialLives
-	e.lastActivity = time.Now()
-	e.mu.Unlock()
 
 	e.hub.Broadcast(domain.Event{
 		Type: domain.EventPlayerJoined,
@@ -228,239 +133,154 @@ func (e *Engine) AddPlayer(id, name, actorID string) error {
 	return nil
 }
 
-// HostActorID returns the actor who owns the game's owner player, i.e. the
-// actor allowed to start and close questions. Empty until the owner is added.
-func (e *Engine) HostActorID() string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if owner, ok := e.game.Players[e.game.OwnerID]; ok {
-		return owner.ActorID
-	}
-	return ""
-}
-
-// PlayerActorID returns the actor that owns playerID.
-func (e *Engine) PlayerActorID(playerID string) (string, bool) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	p, ok := e.game.Players[playerID]
-	if !ok {
-		return "", false
-	}
-	return p.ActorID, true
-}
-
-// AddQuestion appends a question to the engine's runtime question list.
-// Useful in tests; in production, questions are loaded from the list at creation.
-func (e *Engine) AddQuestion(q *domain.Question) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.game.Status == domain.GameStatusFinished {
-		return ErrGameFinished
-	}
-	if q.Answers == nil {
-		q.Answers = make(map[string]*domain.Answer)
-	}
-	e.game.Questions = append(e.game.Questions, q)
-	return nil
-}
-
 // StartNextQuestion advances to the next question and broadcasts question_started.
-func (e *Engine) StartNextQuestion() error {
-	var event domain.Event
-
-	e.mu.Lock()
-	if e.game.Status == domain.GameStatusFinished {
-		reason := e.game.EndReason
-		e.mu.Unlock()
-		if reason == domain.GameOverNoMoreQuestions {
+// With an answer timeout, it registers the deadline so that any instance can
+// close the question when it passes (see Manager.CloseDue).
+func (e *Engine) StartNextQuestion(ctx context.Context) error {
+	var payload map[string]any
+	err := e.locked(ctx, func(s *State) error {
+		if s.Status == domain.GameStatusFinished {
+			if s.EndReason == domain.GameOverNoMoreQuestions {
+				return ErrNoMoreQuestions
+			}
+			return ErrGameFinished
+		}
+		if s.QuestionOpen {
+			return ErrQuestionOpen
+		}
+		next := s.CurrentQIdx + 1
+		if next >= s.TotalQuestions {
 			return ErrNoMoreQuestions
 		}
-		return ErrGameFinished
+		q, err := e.m.store.Question(ctx, e.id, next)
+		if err != nil {
+			return err
+		}
+
+		s.Status = domain.GameStatusRunning
+		s.CurrentQIdx = next
+		s.QuestionOpen = true
+		s.QuestionStart = time.Now()
+		s.Current = q
+		s.Answers = map[string]string{}
+
+		// Schedule before saving: if the save fails, the stale deadline is
+		// harmless (closing checks the question index).
+		if t := s.Config.AnswerTimeoutSeconds; t > 0 {
+			deadline := s.QuestionStart.Add(time.Duration(t) * time.Second)
+			if err := e.m.store.ScheduleClose(ctx, e.id, next, deadline); err != nil {
+				return err
+			}
+		}
+		if err := e.m.store.Save(ctx, s); err != nil {
+			return err
+		}
+		payload = s.questionPayload()
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	if e.game.QuestionOpen {
-		e.mu.Unlock()
-		return ErrQuestionOpen
-	}
 
-	nextIdx := e.game.CurrentQIdx + 1
-	if nextIdx >= len(e.game.Questions) {
-		e.mu.Unlock()
-		return ErrNoMoreQuestions
-	}
-
-	e.game.Status = domain.GameStatusRunning
-	e.game.CurrentQIdx = nextIdx
-	e.game.QuestionOpen = true
-	e.game.QuestionStart = time.Now()
-	payload := e.questionPayloadLocked()
-	timeout := e.cfg.AnswerTimeoutSeconds
-	if timeout > 0 {
-		// Armed under the lock so a close racing with this start can stop it.
-		e.answerTimer = time.AfterFunc(time.Duration(timeout)*time.Second, func() {
-			e.closeQuestion(nextIdx) //nolint:errcheck // stale timers are expected to fail
-		})
-	}
-	e.lastActivity = time.Now()
-	e.mu.Unlock()
-
-	event = domain.Event{Type: domain.EventQuestionStarted, Payload: payload}
-
-	e.hub.Broadcast(event)
-
+	e.hub.Broadcast(domain.Event{Type: domain.EventQuestionStarted, Payload: payload})
 	return nil
 }
 
 // SubmitAnswer records a player's answer. Only the first submission counts.
-func (e *Engine) SubmitAnswer(playerID, questionID, optionID string) error {
-	var event domain.Event
-
-	e.mu.Lock()
-	if e.game.Status != domain.GameStatusRunning {
-		e.mu.Unlock()
+// It does not take the game lock: the store records the answer atomically,
+// and only if the question is still the open one.
+func (e *Engine) SubmitAnswer(ctx context.Context, playerID, questionID, optionID string) error {
+	s, err := e.m.store.Load(ctx, e.id)
+	if err != nil {
+		return err
+	}
+	if s.Status != domain.GameStatusRunning {
 		return ErrGameNotRunning
 	}
-	player, ok := e.game.Players[playerID]
+	player, ok := s.Players[playerID]
 	if !ok {
-		e.mu.Unlock()
 		return ErrPlayerNotFound
 	}
 	if !player.Active {
-		e.mu.Unlock()
 		return ErrPlayerEliminated
 	}
-	if !e.game.QuestionOpen {
-		e.mu.Unlock()
+	if !s.QuestionOpen || s.Current == nil {
 		return ErrNoActiveQuestion
 	}
-	q := e.game.Questions[e.game.CurrentQIdx]
-	if q.ID != questionID {
-		e.mu.Unlock()
+	if s.Current.ID != questionID {
 		return ErrWrongQuestion
 	}
-	if _, answered := q.Answers[playerID]; answered {
-		e.mu.Unlock()
+	if _, answered := s.Answers[playerID]; answered {
 		return ErrAlreadyAnswered
 	}
-	if !hasOption(q, optionID) {
-		e.mu.Unlock()
+	if !hasOption(s.Current, optionID) {
 		return ErrInvalidOption
 	}
-
-	q.Answers[playerID] = &domain.Answer{
-		PlayerID:    playerID,
-		QuestionID:  questionID,
-		OptionID:    optionID,
-		Correct:     q.CorrectOptionID == optionID,
-		SubmittedAt: time.Now(),
+	if err := e.m.store.RecordAnswer(ctx, e.id, s.CurrentQIdx, playerID, optionID); err != nil {
+		return err
 	}
-	e.lastActivity = time.Now()
-	e.mu.Unlock()
 
 	// Broadcast answer_submitted without revealing correctness.
-	event = domain.Event{
+	e.hub.Broadcast(domain.Event{
 		Type: domain.EventAnswerSubmitted,
 		Payload: map[string]any{
 			"player_id":   playerID,
 			"question_id": questionID,
 		},
-	}
-	e.hub.Broadcast(event)
+	})
 	return nil
 }
 
 // CloseQuestion ends the current question, applies life penalties, and detects game over.
-func (e *Engine) CloseQuestion() (*CloseQuestionResult, error) {
-	return e.closeQuestion(-1)
+func (e *Engine) CloseQuestion(ctx context.Context) (*CloseQuestionResult, error) {
+	return e.closeQuestion(ctx, -1)
 }
 
-// closeQuestion closes the open question. When onlyIdx >= 0 it closes only if
-// that question is the open one, so a timer armed for an earlier question can
-// never close a later one. The check and the close happen under one lock.
-func (e *Engine) closeQuestion(onlyIdx int) (*CloseQuestionResult, error) {
-	e.mu.Lock()
-
-	if e.game.Status != domain.GameStatusRunning {
-		e.mu.Unlock()
-		return nil, ErrGameNotRunning
-	}
-	if !e.game.QuestionOpen || (onlyIdx >= 0 && e.game.CurrentQIdx != onlyIdx) {
-		e.mu.Unlock()
-		return nil, ErrNoActiveQuestion
-	}
-
-	e.game.QuestionOpen = false
-	if e.answerTimer != nil {
-		e.answerTimer.Stop()
-		e.answerTimer = nil
-	}
-	q := e.game.Questions[e.game.CurrentQIdx]
-	result := &CloseQuestionResult{}
-
-	for playerID, player := range e.game.Players {
-		if !player.Active {
-			continue
+// closeQuestion closes the open question. When onlyIdx >= 0 it closes only
+// if that question is the open one, so a deadline registered for an earlier
+// question can never close a later one.
+func (e *Engine) closeQuestion(ctx context.Context, onlyIdx int) (*CloseQuestionResult, error) {
+	var (
+		result          *CloseQuestionResult
+		questionID      string
+		correctOptionID string
+		livesAfter      map[string]int
+	)
+	err := e.locked(ctx, func(s *State) error {
+		if s.Status != domain.GameStatusRunning {
+			return ErrGameNotRunning
 		}
-		answer, answered := q.Answers[playerID]
-		if !answered || !answer.Correct {
-			player.Lives--
-			result.LifeLost = append(result.LifeLost, playerID)
-			if player.Lives <= 0 {
-				player.Active = false
-				result.Eliminated = append(result.Eliminated, playerID)
-			}
+		if !s.QuestionOpen || (onlyIdx >= 0 && s.CurrentQIdx != onlyIdx) {
+			return ErrNoActiveQuestion
 		}
+		// Closing and reading the answers is one atomic step: an answer is
+		// either counted here or rejected as too late.
+		answers, err := e.m.store.CloseAnswers(ctx, e.id, s.CurrentQIdx)
+		if err != nil {
+			return err
+		}
+		s.QuestionOpen = false
+		s.Answers = answers
+		result, livesAfter = applyPenalties(s)
+
+		changed := make([]*domain.Player, 0, len(result.LifeLost))
+		for _, pid := range result.LifeLost {
+			changed = append(changed, s.Players[pid])
+		}
+		if err := e.m.store.Save(ctx, s, changed...); err != nil {
+			return err
+		}
+		if err := e.m.store.CancelClose(ctx, e.id, s.CurrentQIdx); err != nil {
+			e.m.logger.Warn("cancel answer deadline", "error", err, "game_id", e.id)
+		}
+		questionID, correctOptionID = s.Current.ID, s.Current.CorrectOptionID
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	// The game ends when at most one player is left, or when the last question
-	// has been played. In the latter case the survivor with the most lives wins;
-	// a tie on lives is a draw (no winner).
-	active := e.activePlayers()
-	result.RemainingQuestions = len(e.game.Questions) - e.game.CurrentQIdx - 1
-	switch {
-	case len(active) == 1:
-		result.Reason = domain.GameOverLastPlayerStanding
-	case len(active) == 0:
-		result.Reason = domain.GameOverAllEliminated
-	case result.RemainingQuestions == 0:
-		result.Reason = domain.GameOverNoMoreQuestions
-	}
-	if result.Reason != "" {
-		e.game.Status = domain.GameStatusFinished
-		e.game.EndReason = result.Reason
-		result.GameOver = true
-		result.Survivors = active
-		result.Winner = e.leaderLocked(active)
-	}
-
-	// Snapshot data needed for events and persistence before releasing the lock.
-	livesAfter := make(map[string]int, len(result.LifeLost))
-	for _, pid := range result.LifeLost {
-		livesAfter[pid] = e.game.Players[pid].Lives
-	}
-	// Build LifeDeltas for best-effort Postgres persistence.
-	result.LifeDeltas = make([]LifeDelta, 0, len(result.LifeLost))
-	for _, pid := range result.LifeLost {
-		p := e.game.Players[pid]
-		result.LifeDeltas = append(result.LifeDeltas, LifeDelta{
-			PlayerID:  pid,
-			LivesLeft: p.Lives,
-			Active:    p.Active,
-		})
-	}
-
-	result.Players = e.scoreboardLocked()
-	correctOptionID := q.CorrectOptionID
-	questionID := q.ID
-	winner := result.Winner
-	gameOver := result.GameOver
-
-	e.lastActivity = time.Now()
-	onClose := e.onQuestionClosed
-	e.mu.Unlock()
-
-	// Broadcast events after releasing the lock.
+	// Broadcast events after the lock is released.
 	e.hub.Broadcast(domain.Event{
 		Type: domain.EventQuestionClosed,
 		Payload: map[string]any{
@@ -481,124 +301,75 @@ func (e *Engine) closeQuestion(onlyIdx int) (*CloseQuestionResult, error) {
 	}
 	for _, pid := range result.Eliminated {
 		e.hub.Broadcast(domain.Event{
-			Type: domain.EventPlayerEliminated,
-			Payload: map[string]any{
-				"player_id": pid,
-			},
+			Type:    domain.EventPlayerEliminated,
+			Payload: map[string]any{"player_id": pid},
 		})
 	}
-	if gameOver {
+	if result.GameOver {
 		e.hub.Broadcast(domain.Event{
 			Type: domain.EventGameOver,
 			Payload: map[string]any{
 				"reason":    result.Reason,
-				"winner_id": winner,
+				"winner_id": result.Winner,
 				"survivors": result.Survivors,
 			},
 		})
 	}
 
-	if onClose != nil {
-		onClose(result)
-	}
+	e.m.questionClosed(e.id, result)
 	return result, nil
 }
 
-// Snapshot returns a deep copy of the game state, safe to read after the lock
-// is released. Option slices are shared because they are never mutated.
-func (e *Engine) Snapshot() domain.Game {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	g := *e.game
-	g.Players = make(map[string]*domain.Player, len(e.game.Players))
-	for id, p := range e.game.Players {
-		cp := *p
-		g.Players[id] = &cp
-	}
-	g.Questions = make([]*domain.Question, len(e.game.Questions))
-	for i, q := range e.game.Questions {
-		cq := *q
-		cq.Answers = make(map[string]*domain.Answer, len(q.Answers))
-		for pid, a := range q.Answers {
-			ca := *a
-			cq.Answers[pid] = &ca
+// applyPenalties applies the rules of a closed question to s: every active
+// player who answered wrong or not at all loses a life, 0 lives eliminates.
+// The game ends when at most one player is left, or after the last question;
+// then the survivor with the most lives wins and a tie is a draw.
+func applyPenalties(s *State) (*CloseQuestionResult, map[string]int) {
+	result := &CloseQuestionResult{}
+	livesAfter := map[string]int{}
+	for _, pid := range sortedPlayerIDs(s) {
+		player := s.Players[pid]
+		if !player.Active {
+			continue
 		}
-		g.Questions[i] = &cq
-	}
-	return g
-}
-
-// Expired reports whether the game can be evicted at now: finished games are
-// kept for finishedTTL after their last question (so clients can still read
-// the final state), unfinished games are evicted after idleTTL without activity.
-func (e *Engine) Expired(now time.Time, finishedTTL, idleTTL time.Duration) bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	idle := now.Sub(e.lastActivity)
-	if e.game.Status == domain.GameStatusFinished {
-		return idle >= finishedTTL
-	}
-	return idle >= idleTTL
-}
-
-// Scoreboard lists every player's lives, sorted by name then ID.
-func (e *Engine) Scoreboard() []PlayerScore {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.scoreboardLocked()
-}
-
-// scoreboardLocked lists every player's lives, sorted by name then ID.
-// Caller holds the lock.
-func (e *Engine) scoreboardLocked() []PlayerScore {
-	scores := make([]PlayerScore, 0, len(e.game.Players))
-	for _, p := range e.game.Players {
-		scores = append(scores, PlayerScore{ID: p.ID, Name: p.Name, Lives: p.Lives, Active: p.Active})
-	}
-	sort.Slice(scores, func(i, j int) bool {
-		if scores[i].Name != scores[j].Name {
-			return scores[i].Name < scores[j].Name
-		}
-		return scores[i].ID < scores[j].ID
-	})
-	return scores
-}
-
-func hasOption(q *domain.Question, optionID string) bool {
-	for _, o := range q.Options {
-		if o.ID == optionID {
-			return true
+		if s.Answers[pid] != s.Current.CorrectOptionID {
+			player.Lives--
+			result.LifeLost = append(result.LifeLost, pid)
+			if player.Lives <= 0 {
+				player.Active = false
+				result.Eliminated = append(result.Eliminated, pid)
+			}
+			livesAfter[pid] = player.Lives
+			result.LifeDeltas = append(result.LifeDeltas, LifeDelta{PlayerID: pid, LivesLeft: player.Lives, Active: player.Active})
 		}
 	}
-	return false
+
+	active := s.activePlayers()
+	result.RemainingQuestions = s.RemainingQuestions()
+	switch {
+	case len(active) == 1:
+		result.Reason = domain.GameOverLastPlayerStanding
+	case len(active) == 0:
+		result.Reason = domain.GameOverAllEliminated
+	case result.RemainingQuestions == 0:
+		result.Reason = domain.GameOverNoMoreQuestions
+	}
+	if result.Reason != "" {
+		s.Status = domain.GameStatusFinished
+		s.EndReason = result.Reason
+		result.GameOver = true
+		result.Survivors = active
+		result.Winner = s.leader(active)
+	}
+	result.Players = s.Scoreboard()
+	return result, livesAfter
 }
 
-// leaderLocked returns the player with strictly the most lives among ids,
-// or "" if ids is empty or the top is tied. Caller must hold the lock.
-func (e *Engine) leaderLocked(ids []string) string {
-	leader, best, tied := "", -1, false
-	for _, id := range ids {
-		switch lives := e.game.Players[id].Lives; {
-		case lives > best:
-			leader, best, tied = id, lives, false
-		case lives == best:
-			tied = true
-		}
+func sortedPlayerIDs(s *State) []string {
+	ids := make([]string, 0, len(s.Players))
+	for id := range s.Players {
+		ids = append(ids, id)
 	}
-	if tied {
-		return ""
-	}
-	return leader
-}
-
-func (e *Engine) activePlayers() []string {
-	// assumes lock is held
-	active := make([]string, 0, len(e.game.Players))
-	for id, p := range e.game.Players {
-		if p.Active {
-			active = append(active, id)
-		}
-	}
-	return active
+	sort.Strings(ids)
+	return ids
 }

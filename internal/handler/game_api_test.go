@@ -29,8 +29,8 @@ func gameServer(t *testing.T) (*httptest.Server, *game.Manager) {
 	for i, id := range []string{"q1", "q2"} {
 		m.questions[id] = memQuestion(id, "list-1", i)
 	}
-	manager := game.NewManager()
 	hub := appws.NewHub(logger)
+	manager := testManager(t, hub)
 	h := NewGameHandler(manager, hubSessions{hub}, nil, nil, m, game.EngineConfig{InitialLives: 3}, logger)
 
 	r := chi.NewRouter()

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -45,10 +46,13 @@ func dialPlayer(t *testing.T, srv *httptest.Server, playerID string) *websocket.
 func TestWebSocketReconnectKeepsNewConnection(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hub := appws.NewHub(logger)
-	manager := game.NewManager()
-	eng := manager.Create("g1", "owner", "", nil, game.EngineConfig{InitialLives: 3}, hub)
+	manager := testManager(t, hub)
+	eng, err := manager.Create(context.Background(), "g1", "owner", "", nil, game.EngineConfig{InitialLives: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// No auth middleware in this test: extractActor falls back to "anonymous".
-	eng.AddPlayer("p1", "Alice", "anonymous")
+	eng.AddPlayer(context.Background(), "p1", "Alice", "anonymous")
 
 	h := NewGameHandler(manager, hubSessions{hub}, nil, nil, nil, game.EngineConfig{InitialLives: 3}, logger)
 	srv := httptest.NewServer(http.HandlerFunc(h.WebSocket))
@@ -86,9 +90,12 @@ func TestWebSocketReconnectKeepsNewConnection(t *testing.T) {
 func TestWebSocketOriginCheck(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hub := appws.NewHub(logger)
-	manager := game.NewManager()
-	eng := manager.Create("g1", "owner", "", nil, game.EngineConfig{InitialLives: 3}, hub)
-	eng.AddPlayer("p1", "Alice", "anonymous")
+	manager := testManager(t, hub)
+	eng, err := manager.Create(context.Background(), "g1", "owner", "", nil, game.EngineConfig{InitialLives: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.AddPlayer(context.Background(), "p1", "Alice", "anonymous")
 	h := NewGameHandler(manager, hubSessions{hub}, nil, nil, nil, game.EngineConfig{InitialLives: 3}, logger)
 	h.RestrictOrigins([]string{"https://ui.example.com"})
 	srv := httptest.NewServer(http.HandlerFunc(h.WebSocket))

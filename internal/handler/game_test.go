@@ -20,22 +20,29 @@ import (
 )
 
 func TestWriteGameError(t *testing.T) {
-	cases := map[error]string{
-		game.ErrNoMoreQuestions:  "no_more_questions",
-		game.ErrGameFinished:     "game_finished",
-		game.ErrGameNotRunning:   "game_not_running",
-		game.ErrNoActiveQuestion: "no_active_question",
-		game.ErrQuestionOpen:     "question_open",
-		errors.New("other"):      "conflict",
+	h := &GameHandler{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cases := []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{game.ErrNoMoreQuestions, http.StatusConflict, "no_more_questions"},
+		{game.ErrGameFinished, http.StatusConflict, "game_finished"},
+		{game.ErrGameNotRunning, http.StatusConflict, "game_not_running"},
+		{game.ErrNoActiveQuestion, http.StatusConflict, "no_active_question"},
+		{game.ErrQuestionOpen, http.StatusConflict, "question_open"},
+		{game.ErrBusy, http.StatusServiceUnavailable, "game_busy"},
+		{game.ErrGameNotFound, http.StatusNotFound, ""},
+		{errors.New("redis down"), http.StatusInternalServerError, ""},
 	}
-	for err, want := range cases {
+	for _, c := range cases {
 		rec := httptest.NewRecorder()
-		writeGameError(rec, err)
+		h.writeGameError(rec, c.err)
 
 		var body map[string]string
 		json.NewDecoder(rec.Body).Decode(&body)
-		if rec.Code != http.StatusConflict || body["code"] != want || body["error"] != err.Error() {
-			t.Errorf("%v: got %d %v, want 409 code=%s", err, rec.Code, body, want)
+		if rec.Code != c.status || body["code"] != c.code {
+			t.Errorf("%v: got %d %v, want %d code=%q", c.err, rec.Code, body, c.status, c.code)
 		}
 	}
 }
@@ -54,7 +61,7 @@ func (emptyListStore) ListQuestions(context.Context, string) ([]store.QuestionRe
 func TestCreateGame_RejectsEmptyList(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := game.EngineConfig{InitialLives: 3}
-	h := NewGameHandler(game.NewManager(), nil, nil, nil, emptyListStore{}, cfg, logger)
+	h := NewGameHandler(testManager(t, nopBroadcaster{}), nil, nil, nil, emptyListStore{}, cfg, logger)
 
 	req := httptest.NewRequest(http.MethodPost, "/games", strings.NewReader(`{"owner_name":"Alice","question_list_id":"list-1"}`))
 	rec := httptest.NewRecorder()
@@ -121,11 +128,11 @@ func (s *recordingStore) UpdateGameStatus(_ context.Context, _ string, status st
 	return nil
 }
 
-// A question closed by the answer timeout must be persisted like a manual close.
+// A question closed at its answer deadline must be persisted like a manual close.
 func TestAnswerTimeoutIsPersisted(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	rec := &recordingStore{lives: map[string]int{}}
-	manager := game.NewManager()
+	manager := testManager(t, nopBroadcaster{})
 	h := NewGameHandler(manager, fakeSessions{}, rec, rec, oneQuestionStore{}, game.EngineConfig{InitialLives: 3}, logger)
 
 	body := `{"owner_name":"Alice","question_list_id":"list-1","answer_timeout_seconds":1}`
@@ -140,21 +147,15 @@ func TestAnswerTimeoutIsPersisted(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &created)
 
-	eng, _ := manager.Get(created.GameID)
-	if err := eng.StartNextQuestion(); err != nil {
+	ctx := context.Background()
+	eng, _ := manager.Get(ctx, created.GameID)
+	if err := eng.StartNextQuestion(ctx); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
-	// Nobody answers and nobody closes: the timeout does.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		rec.mu.Lock()
-		done := len(rec.statuses) > 0
-		rec.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Nobody answers and nobody closes: the deadline does.
+	if n := manager.CloseDue(ctx, time.Now().Add(2*time.Second)); n != 1 {
+		t.Fatalf("expected the deadline to close the question, closed %d", n)
 	}
 
 	rec.mu.Lock()

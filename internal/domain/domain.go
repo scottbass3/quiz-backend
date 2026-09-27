@@ -67,20 +67,6 @@ type QuestionList struct {
 	UpdatedAt   time.Time
 }
 
-type Game struct {
-	ID             string
-	Status         GameStatus
-	OwnerID        string
-	QuestionListID string // references the list this game was created from
-	Players        map[string]*Player
-	Questions      []*Question    // runtime copy, loaded from the list at game creation
-	CurrentQIdx    int            // index of the last started question, -1 before the first
-	QuestionOpen   bool           // true between question_started and question_closed
-	QuestionStart  time.Time      // when the current question was started
-	EndReason      GameOverReason // empty until the game is finished
-	CreatedAt      time.Time
-}
-
 type Player struct {
 	ID      string
 	Name    string
@@ -90,8 +76,8 @@ type Player struct {
 	ActorID string // authenticated actor who created this player (auth.Actor.Sub)
 }
 
-// Question holds both catalog metadata (QuestionListID, OrderIndex) and
-// runtime state (Answers). Answers are never persisted; they live only in memory.
+// Question is a game's copy of a catalog question, including its correct
+// answer. Answers to it are kept by the game state store, keyed by player.
 type Question struct {
 	ID              string
 	QuestionListID  string // catalog reference
@@ -99,8 +85,7 @@ type Question struct {
 	Options         []Option
 	CorrectOptionID string
 	OrderIndex      int
-	Theme           *QuestionTheme     // optional, nil when the question has no theme
-	Answers         map[string]*Answer // runtime only
+	Theme           *QuestionTheme // optional, nil when the question has no theme
 }
 
 // QuestionTheme is the theme of a question as sent to players.
@@ -114,14 +99,6 @@ type QuestionTheme struct {
 type Option struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
-}
-
-type Answer struct {
-	PlayerID    string
-	QuestionID  string
-	OptionID    string
-	Correct     bool
-	SubmittedAt time.Time
 }
 
 type Event struct {
