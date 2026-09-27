@@ -1,0 +1,12 @@
+# Keep the build context small: only Go sources are needed by the images.
+.git
+.env
+.env.*
+!.env.example
+tmp/
+bin/
+tools/test-ui/node_modules/
+tools/test-ui/dist/
+k6/
+docs/
+*.md
